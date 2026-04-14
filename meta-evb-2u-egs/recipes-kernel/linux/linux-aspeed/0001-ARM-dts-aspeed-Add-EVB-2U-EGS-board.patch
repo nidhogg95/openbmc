@@ -1,0 +1,32 @@
+From 979eb21ef262b1e32c5ec3807a19ec2bf91a7e06 Mon Sep 17 00:00:00 2001
+From: OpenBMC Developer <openbmc-dev@example.com>
+Date: Mon, 13 Apr 2026 00:00:00 +0800
+Subject: [PATCH] ARM: dts: aspeed: Add EVB-2U-EGS board device tree
+
+Add device tree for EVB-2U-EGS BMC board based on AST2600-A1.
+
+Platform: 2U rack server with Intel EGS dual-socket CPUs,
+dual 64MB SPI flash (A/B bank), 4 system fans via I2C CPLD,
+2 redundant PSUs, PECI for CPU thermals, and RGMII + NC-SI
+network interfaces.
+
+Signed-off-by: OpenBMC Developer <openbmc-dev@example.com>
+Upstream-Status: Pending
+---
+ arch/arm/boot/dts/aspeed/Makefile | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm/boot/dts/aspeed/Makefile b/arch/arm/boot/dts/aspeed/Makefile
+index 767f7c7652d5..e846412cc95e 100644
+--- a/arch/arm/boot/dts/aspeed/Makefile
++++ b/arch/arm/boot/dts/aspeed/Makefile
+@@ -20,6 +20,7 @@ dtb-$(CONFIG_ARCH_ASPEED) += \
+ 	aspeed-bmc-asus-x4tf.dtb \
+ 	aspeed-bmc-bytedance-g220a.dtb \
+ 	aspeed-bmc-delta-ahe50dc.dtb \
++	aspeed-bmc-evb-2u-egs.dtb \
+ 	aspeed-bmc-facebook-anacapa.dtb \
+ 	aspeed-bmc-facebook-bletchley.dtb \
+ 	aspeed-bmc-facebook-catalina.dtb \
+-- 
+2.34.1

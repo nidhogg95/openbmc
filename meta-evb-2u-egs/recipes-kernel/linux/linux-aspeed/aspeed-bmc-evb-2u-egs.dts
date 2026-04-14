@@ -1,0 +1,547 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/dts-v1/;
+
+#include "aspeed-g6.dtsi"
+#include <dt-bindings/gpio/aspeed-gpio.h>
+#include <dt-bindings/i2c/i2c.h>
+
+/ {
+	model = "EVB-2U-EGS BMC";
+	compatible = "evb-2u-egs-bmc", "aspeed,ast2600";
+
+	aliases {
+		/* MUX downstream buses */
+		i2c20 = &i2c3_mux0_ch0; /* bus3 mux0x73 CH0: AD5593R sensors */
+		i2c21 = &i2c3_mux0_ch1; /* bus3 mux0x73 CH1: LM75 inlet */
+		i2c22 = &i2c3_mux0_ch2; /* bus3 mux0x73 CH2: MB LM75 in/out */
+		i2c23 = &i2c0_mux0_ch0; /* bus0 mux0x73 CH0: front CPLD */
+		i2c24 = &i2c0_mux0_ch1; /* bus0 mux0x73 CH1 */
+		i2c25 = &i2c0_mux0_ch2; /* bus0 mux0x73 CH2 */
+		i2c26 = &i2c0_mux0_ch3; /* bus0 mux0x73 CH3 */
+	};
+
+	chosen {
+		stdout-path = &uart5;
+		bootargs = "console=ttyS4,115200n8 earlycon";
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x40000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		video_engine_memory: framebuffer@9f000000 {
+			no-map;
+			reg = <0x9f000000 0x01000000>; /* 16MB */
+		};
+	};
+
+	iio-hwmon {
+		compatible = "iio-hwmon";
+		io-channels = <&adc0 0>, <&adc0 1>, <&adc0 2>, <&adc0 3>,
+			<&adc0 4>, <&adc0 5>, <&adc0 6>, <&adc0 7>,
+			<&adc1 0>, <&adc1 1>, <&adc1 2>, <&adc1 3>,
+			<&adc1 4>, <&adc1 5>, <&adc1 6>, <&adc1 7>;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		/* Front Panel ID LED (active-low) */
+		identify {
+			label = "identify";
+			gpios = <&gpio0 ASPEED_GPIO(B, 7) GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		/* System Status Green LED (active-low) */
+		status-green {
+			label = "status-green";
+			gpios = <&gpio0 ASPEED_GPIO(G, 2) GPIO_ACTIVE_LOW>;
+			default-state = "on";
+		};
+
+		/* System Status Amber LED (active-low) */
+		status-amber {
+			label = "status-amber";
+			gpios = <&gpio0 ASPEED_GPIO(G, 3) GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		/* Fan Fault LED (active-low) */
+		fan-fault {
+			label = "fan-fault";
+			gpios = <&gpio0 ASPEED_GPIO(G, 4) GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		/* BMC Heartbeat LED (R1D) */
+		heartbeat {
+			label = "heartbeat";
+			gpios = <&gpio0 ASPEED_GPIO(O, 4) GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "heartbeat";
+		};
+
+		/* FW Config Done LED (active-low) */
+		fw-config-done {
+			label = "fw-config-done";
+			gpios = <&gpio0 ASPEED_GPIO(V, 5) GPIO_ACTIVE_LOW>;
+			default-state = "on";
+		};
+	};
+};
+
+/* ===== GPIO line names and hogs ===== */
+&gpio0 {
+	gpio-line-names =
+	/*A0-A7*/ "","","","","GPIO_BMC_CPLD_LIQUID","","","",
+	/*B0-B7*/ "","","","GPIO_SYS_PWROK","","","FM_BMC_BMCINIT","FP_ID_LED_N",
+	/*C0-C7*/ "","","","","","","","",
+	/*D0-D7*/ "","","","","","","","",
+	/*E0-E7*/ "","","","FM_PCH_BMC_THERMTRIP","","","","",
+	/*F0-F7*/ "SKU_ID0_N","SKU_ID1_N","SKU_ID2_N","BOARD_ID0","BOARD_ID1","SKU_ID5_N","FP_ID_BTN","PS_PWROK",
+	/*G0-G7*/ "","","STATUS_GREEN_LED_N","STATUS_AMBER_LED_N","FAN_FAULT_LED_N","","","",
+	/*H0-H7*/ "","","","","","","","",
+	/*I0-I7*/ "","","","","","PWBTN_OUT_N","","",
+	/*J0-J7*/ "","","","","","","","",
+	/*K0-K7*/ "","","","","","","","",
+	/*L0-L7*/ "","","","","","","","",
+	/*M0-M7*/ "","CPUERR2_INT","","","PHYSICAL_BUTTON_LOCK","","","",
+	/*N0-N7*/ "","","","","","","","RST_RGMII_PHYRST_N",
+	/*O0-O7*/ "","CPLD_HOLD_IO","","","HEARTBEAT_R1D","CPU1_MEMHOT_N","","",
+	/*P0-P7*/ "RSTBTN_IN_N","RSTBTN_OUT_N","PWRBTN_IN_N","","","","","",
+	/*Q0-Q7*/ "","","HEARTBEAT_R1C","","FM_PCH_BMC_THERMTRIP_N","","","BMC_READY_N",
+	/*R0-R7*/ "BIOS_UPDATE","","","FAN_MUX_GPIO","RAC_PRESENCE","","","",
+	/*S0-S7*/ "PE_RESET","CATERR_INT","","BOARD_REV_ID3_N","","P3_BAT_DET","","",
+	/*T0-T7*/ "","","","","","","","",
+	/*U0-U7*/ "","","","","DPU_ADC12_N","DPU_ADC13_N","","",
+	/*V0-V7*/ "SLP_S3","SLP_S4","","","","FW_CONFIG_DONE_N","CPU0_MEMHOT_N","",
+	/*W0-W7*/ "","","","","","","","",
+	/*X0-X7*/ "","SMI_TIMEOUT_INT","POST_COMPLETE_N","","","","","",
+	/*Y0-Y7*/ "","","","","","","","",
+	/*Z0-Z7*/ "","","","","","","","",
+	/*AA0-AA7*/ "","","BMC_BOARD_REV_ID0_N","BMC_BOARD_REV_ID1_N","BMC_BOARD_REV_ID2_N","BMC_BOARD_REV_ID3_N","","",
+	/*AB0-AB7*/ "","","","","","","","",
+	/*AC0-AC7*/ "","","","","","","","";
+
+	/* PHY reset: hold high at boot */
+	phy-reset-hog {
+		gpio-hog;
+		gpios = <ASPEED_GPIO(N, 7) GPIO_ACTIVE_LOW>;
+		output-high;
+		line-name = "RST_RGMII_PHYRST_N";
+	};
+
+	/* BMC Ready indicator (R1D): assert low when BMC is ready */
+	bmc-ready-hog {
+		gpio-hog;
+		gpios = <ASPEED_GPIO(Q, 7) GPIO_ACTIVE_LOW>;
+		output-high;
+		line-name = "BMC_READY";
+	};
+};
+
+/* ===== ADC ===== */
+&adc0 {
+	vref = <2500>;
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_adc0_default &pinctrl_adc1_default
+		&pinctrl_adc2_default &pinctrl_adc3_default
+		&pinctrl_adc4_default &pinctrl_adc5_default
+		&pinctrl_adc6_default &pinctrl_adc7_default>;
+};
+
+&adc1 {
+	vref = <2500>;
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_adc8_default &pinctrl_adc9_default
+		&pinctrl_adc10_default &pinctrl_adc11_default
+		&pinctrl_adc12_default &pinctrl_adc13_default
+		&pinctrl_adc14_default &pinctrl_adc15_default>;
+};
+
+/* ===== Flash: dual 64MB w25q512, Bank A (CS0) + Bank B (CS1) ===== */
+&fmc {
+	status = "okay";
+
+	flash@0 {
+		status = "okay";
+		m25p,fast-read;
+		label = "bmc";
+		spi-max-frequency = <50000000>;
+#include "openbmc-flash-layout-64.dtsi"
+	};
+
+	flash@1 {
+		status = "okay";
+		m25p,fast-read;
+		label = "bmc-backup";
+		spi-max-frequency = <50000000>;
+	};
+};
+
+/* ===== Network ===== */
+&mdio2 {
+	status = "okay";
+
+	ethphy1: ethernet-phy@0 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <0>;
+	};
+};
+
+/* mac1: RGMII with external PHY */
+&mac2 {
+	status = "okay";
+	phy-mode = "rgmii-rxid";
+	phy-handle = <&ethphy1>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_rgmii3_default>;
+};
+
+/* mac2: RMII with NC-SI (BMC management) */
+&mac3 {
+	status = "okay";
+	phy-mode = "rmii";
+	use-ncsi;
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_rmii4_default>;
+};
+
+/* ===== PECI: CPU thermal via PECI bus ===== */
+&peci0 {
+	status = "okay";
+
+	peci-client@30 {
+		compatible = "intel,peci-client";
+		reg = <0x30>;
+	};
+
+	peci-client@31 {
+		compatible = "intel,peci-client";
+		reg = <0x31>;
+	};
+};
+
+/* ===== LPC / KCS / IPMI ===== */
+&kcs3 {
+	status = "okay";
+	aspeed,lpc-io-reg = <0xCA2>;
+};
+
+&lpc_snoop {
+	status = "okay";
+	snoop-ports = <0x80>;
+};
+
+/* ===== UART ===== */
+&uart1 {
+	/* Host serial share (ttyS0 in host) */
+	status = "okay";
+};
+
+&uart3 {
+	/* ttyS2: shared host serial */
+	status = "okay";
+};
+
+&uart4 {
+	/* ttyS3: SOL (Serial over LAN) */
+	status = "okay";
+};
+
+&uart5 {
+	/* ttyS4: BMC console at 115200 */
+	status = "okay";
+};
+
+&uart_routing {
+	status = "okay";
+};
+
+/* ===== USB Virtual Hub ===== */
+&vhub {
+	status = "okay";
+};
+
+/* ===== I2C Buses ===== */
+
+/* Bus 0: Front/backplane CPLD via PCA9546 MUX */
+&i2c0 {
+	status = "okay";
+
+	i2c-mux@73 {
+		compatible = "nxp,pca9546";
+		reg = <0x73>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		i2c-mux-idle-disconnect;
+
+		i2c0_mux0_ch0: i2c@0 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0>;
+			/* Front CPLD @ 0x58, 0x59, 0x5A */
+		};
+
+		i2c0_mux0_ch1: i2c@1 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <1>;
+		};
+
+		i2c0_mux0_ch2: i2c@2 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <2>;
+		};
+
+		i2c0_mux0_ch3: i2c@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <3>;
+		};
+	};
+};
+
+/* Bus 1: VR PMBus + IPMB/NM shared bus */
+&i2c1 {
+	status = "okay";
+	/* VR CPU0 VCCD @ 0x08 */
+	/* VR CPU1 VCCD @ 0x06 */
+	/* VR CPU0 VCCIN @ 0x58 */
+	/* VR CPU1 VCCIN @ 0x5E */
+	/* VR CPU0 FAON @ 0x66 */
+	/* VR CPU1 FAON @ 0x5C */
+	/* Note: also used as IPMB/NM third channel (0x24) */
+};
+
+/* Bus 2: MB FRU EEPROM + rear CPLD */
+&i2c2 {
+	status = "okay";
+
+	/* MB FRU EEPROM (24C64, 2-byte address) */
+	mb_fru: eeprom@50 {
+		compatible = "atmel,24c64";
+		reg = <0x50>;
+		pagesize = <32>;
+	};
+
+	/* Rear/internal CPLD @ 0x58, 0x59, 0x5A */
+};
+
+/* Bus 3: PCA9548 (NVMe/RAID) + PCA9546 (sensors/ADC) + MAC EEPROM */
+&i2c3 {
+	status = "okay";
+
+	/* NVMe/RAID I2C MUX */
+	i2c-mux@70 {
+		compatible = "nxp,pca9548";
+		reg = <0x70>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		i2c-mux-idle-disconnect;
+
+		i2c@0 { reg = <0>; #address-cells = <1>; #size-cells = <0>; };
+		i2c@1 { reg = <1>; #address-cells = <1>; #size-cells = <0>; };
+		i2c@2 { reg = <2>; #address-cells = <1>; #size-cells = <0>; };
+		i2c@3 { reg = <3>; #address-cells = <1>; #size-cells = <0>; };
+		i2c@4 { reg = <4>; #address-cells = <1>; #size-cells = <0>; };
+		i2c@5 { reg = <5>; #address-cells = <1>; #size-cells = <0>; };
+		i2c@6 { reg = <6>; #address-cells = <1>; #size-cells = <0>; };
+		i2c@7 { reg = <7>; #address-cells = <1>; #size-cells = <0>; };
+	};
+
+	/* Sensor/ADC I2C MUX (R1D) */
+	i2c-mux@73 {
+		compatible = "nxp,pca9546";
+		reg = <0x73>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		i2c-mux-idle-disconnect;
+
+		/* CH0: AD5593R analog sensors */
+		i2c3_mux0_ch0: i2c@0 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0>;
+
+			/* AD5593R IC13: board voltage rails */
+			ad5593r@10 {
+				compatible = "adi,ad5593r";
+				reg = <0x10>;
+			};
+
+			/* AD5593R IC14: VR voltage rails */
+			ad5593r@11 {
+				compatible = "adi,ad5593r";
+				reg = <0x11>;
+			};
+		};
+
+		/* CH1: Inlet temperature sensor */
+		i2c3_mux0_ch1: i2c@1 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <1>;
+
+			inlet_temp: lm75@48 {
+				compatible = "national,lm75";
+				reg = <0x48>;
+			};
+		};
+
+		/* CH2: MB temperature sensors */
+		i2c3_mux0_ch2: i2c@2 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <2>;
+
+			mb_inlet_temp: lm75@4b {
+				compatible = "national,lm75";
+				reg = <0x4b>;
+			};
+
+			mb_outlet_temp: lm75@4a {
+				compatible = "national,lm75";
+				reg = <0x4a>;
+			};
+		};
+
+		i2c@3 {
+			reg = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+	};
+
+	/* MAC EEPROM (R1D) */
+	eeprom@50 {
+		compatible = "atmel,24c64";
+		reg = <0x50>;
+		pagesize = <32>;
+	};
+};
+
+/* Bus 4: reserved/unused */
+&i2c4 {
+	status = "disabled";
+};
+
+/* Bus 5: IPMB slave */
+&i2c5 {
+	status = "okay";
+
+	ipmb@10 {
+		compatible = "ipmb-dev";
+		reg = <(0x10 | I2C_OWN_SLAVE_ADDRESS)>;
+		i2c-protocol;
+	};
+};
+
+/* Bus 6: legacy ADS7830 (R1C only, disabled for R1D) */
+&i2c6 {
+	status = "disabled";
+};
+
+/* Bus 7: PSU PMBus + system board sensors */
+&i2c7 {
+	status = "okay";
+	multi-master;
+
+	/* System board environment sensors */
+	lm87@2d {
+		compatible = "ti,lm87";
+		reg = <0x2d>;
+	};
+
+	adt7475@2e {
+		compatible = "adi,adt7475";
+		reg = <0x2e>;
+	};
+
+	lm75@48 {
+		compatible = "national,lm75";
+		reg = <0x48>;
+	};
+
+	/* PSU 1 PMBus */
+	psu@58 {
+		compatible = "pmbus";
+		reg = <0x58>;
+	};
+
+	/* PSU 2 PMBus */
+	psu@59 {
+		compatible = "pmbus";
+		reg = <0x59>;
+	};
+};
+
+/* Bus 8: Exhaust temperature sensor */
+&i2c8 {
+	status = "okay";
+
+	exhaust_temp: lm75@4d {
+		compatible = "national,lm75";
+		reg = <0x4d>;
+	};
+};
+
+/* Bus 9: MB CPLD / Fan controller */
+&i2c9 {
+	status = "okay";
+	/* Fan CPLD @ 0x22
+	 * Registers:
+	 *   0x03 = tach base
+	 *   0x04 = PWM base
+	 *   0x05 = fan presence (active-low bitmap)
+	 *   0x0A = status/control
+	 * 4 system fans (2U config), 8 tach channels
+	 * This is a custom CPLD; no standard Linux driver.
+	 * OpenBMC will access via i2c-dev or a custom hwmon driver.
+	 */
+};
+
+/* Bus 10: Rear/internal CPLD access */
+&i2c10 {
+	status = "okay";
+	/* CPLD @ 0x58, 0x59, 0x5A */
+};
+
+/* Bus 11: unused */
+&i2c11 {
+	status = "disabled";
+};
+
+/* Bus 12: explicitly disabled */
+&i2c12 {
+	status = "disabled";
+};
+
+/* Bus 13: Outlet temperature + OEM EEPROM (R1C legacy) */
+&i2c13 {
+	status = "okay";
+
+	outlet_temp: lm75@48 {
+		compatible = "national,lm75";
+		reg = <0x48>;
+	};
+};
+
+/* Bus 14: unused */
+&i2c14 {
+	status = "disabled";
+};
+
+/* Bus 15: RAID expansion */
+&i2c15 {
+	status = "okay";
+};

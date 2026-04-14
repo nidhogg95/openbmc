@@ -1,0 +1,199 @@
+{
+    "_comment_": [
+        "EVB-2U-EGS fan control configuration for phosphor-pid-control (swampd).",
+        "IMPORTANT: This platform uses a custom CPLD on I2C bus9 addr 0x22 for fan",
+        "control. The CPLD provides tach (reg 0x03), PWM (reg 0x04), and presence",
+        "(reg 0x05) for 4 system fans with 8 tach channels.",
+        "",
+        "Since there is no standard Linux hwmon driver for this CPLD, the writePath",
+        "and readPath below use D-Bus sensor paths. A custom fan CPLD daemon must be",
+        "implemented to:",
+        "  1. Read tach RPM from CPLD reg 0x03 via i2c-dev and publish to D-Bus",
+        "  2. Accept PWM commands from D-Bus and write to CPLD reg 0x04 via i2c-dev",
+        "  3. Monitor fan presence via CPLD reg 0x05",
+        "",
+        "Alternative: Write a simple hwmon kernel driver for the fan CPLD, then",
+        "replace the D-Bus paths below with sysfs hwmon paths."
+    ],
+    "zones": [
+        {
+            "id": 0,
+            "minThermalOutput": 30.0,
+            "failsafePercent": 100.0
+        }
+    ],
+    "sensors": [
+        {
+            "name": "fan0",
+            "type": "fan",
+            "readPath": "/xyz/openbmc_project/sensors/fan_tach/Fan_0",
+            "writePath": "/xyz/openbmc_project/control/fanpwm/Fan_0",
+            "min": 0,
+            "max": 255
+        },
+        {
+            "name": "fan1",
+            "type": "fan",
+            "readPath": "/xyz/openbmc_project/sensors/fan_tach/Fan_1",
+            "writePath": "/xyz/openbmc_project/control/fanpwm/Fan_1",
+            "min": 0,
+            "max": 255
+        },
+        {
+            "name": "fan2",
+            "type": "fan",
+            "readPath": "/xyz/openbmc_project/sensors/fan_tach/Fan_2",
+            "writePath": "/xyz/openbmc_project/control/fanpwm/Fan_2",
+            "min": 0,
+            "max": 255
+        },
+        {
+            "name": "fan3",
+            "type": "fan",
+            "readPath": "/xyz/openbmc_project/sensors/fan_tach/Fan_3",
+            "writePath": "/xyz/openbmc_project/control/fanpwm/Fan_3",
+            "min": 0,
+            "max": 255
+        },
+        {
+            "name": "cpu0_temp",
+            "type": "temp",
+            "readPath": "/xyz/openbmc_project/sensors/temperature/CPU_0_Package_Temp",
+            "min": 0,
+            "max": 127,
+            "timeout": 0
+        },
+        {
+            "name": "cpu1_temp",
+            "type": "temp",
+            "readPath": "/xyz/openbmc_project/sensors/temperature/CPU_1_Package_Temp",
+            "min": 0,
+            "max": 127,
+            "timeout": 0
+        },
+        {
+            "name": "inlet_temp",
+            "type": "temp",
+            "readPath": "/xyz/openbmc_project/sensors/temperature/Inlet_Temp",
+            "min": 0,
+            "max": 127,
+            "timeout": 0
+        }
+    ],
+    "pid": [
+        {
+            "name": "fan0",
+            "type": "fan",
+            "inputs": ["fan0"],
+            "setpoint": 40.0,
+            "pid": {
+                "samplePeriod": 1.0,
+                "proportionalCoeff": 0.0,
+                "integralCoeff": 0.0,
+                "feedFwdOffsetCoeff": 0.0,
+                "feedFwdGainCoeff": 1.0,
+                "integralLimit_min": 0.0,
+                "integralLimit_max": 100.0,
+                "outLim_min": 30.0,
+                "outLim_max": 100.0,
+                "slewNeg": 0.0,
+                "slewPos": 0.0
+            }
+        },
+        {
+            "name": "fan1",
+            "type": "fan",
+            "inputs": ["fan1"],
+            "setpoint": 40.0,
+            "pid": {
+                "samplePeriod": 1.0,
+                "proportionalCoeff": 0.0,
+                "integralCoeff": 0.0,
+                "feedFwdOffsetCoeff": 0.0,
+                "feedFwdGainCoeff": 1.0,
+                "integralLimit_min": 0.0,
+                "integralLimit_max": 100.0,
+                "outLim_min": 30.0,
+                "outLim_max": 100.0,
+                "slewNeg": 0.0,
+                "slewPos": 0.0
+            }
+        },
+        {
+            "name": "fan2",
+            "type": "fan",
+            "inputs": ["fan2"],
+            "setpoint": 40.0,
+            "pid": {
+                "samplePeriod": 1.0,
+                "proportionalCoeff": 0.0,
+                "integralCoeff": 0.0,
+                "feedFwdOffsetCoeff": 0.0,
+                "feedFwdGainCoeff": 1.0,
+                "integralLimit_min": 0.0,
+                "integralLimit_max": 100.0,
+                "outLim_min": 30.0,
+                "outLim_max": 100.0,
+                "slewNeg": 0.0,
+                "slewPos": 0.0
+            }
+        },
+        {
+            "name": "fan3",
+            "type": "fan",
+            "inputs": ["fan3"],
+            "setpoint": 40.0,
+            "pid": {
+                "samplePeriod": 1.0,
+                "proportionalCoeff": 0.0,
+                "integralCoeff": 0.0,
+                "feedFwdOffsetCoeff": 0.0,
+                "feedFwdGainCoeff": 1.0,
+                "integralLimit_min": 0.0,
+                "integralLimit_max": 100.0,
+                "outLim_min": 30.0,
+                "outLim_max": 100.0,
+                "slewNeg": 0.0,
+                "slewPos": 0.0
+            }
+        },
+        {
+            "name": "cpu_zone",
+            "type": "temp",
+            "inputs": ["cpu0_temp", "cpu1_temp"],
+            "setpoint": 85.0,
+            "pid": {
+                "samplePeriod": 1.0,
+                "proportionalCoeff": -10.0,
+                "integralCoeff": -1.0,
+                "feedFwdOffsetCoeff": 0.0,
+                "feedFwdGainCoeff": 0.0,
+                "integralLimit_min": 30.0,
+                "integralLimit_max": 100.0,
+                "outLim_min": 30.0,
+                "outLim_max": 100.0,
+                "slewNeg": -5.0,
+                "slewPos": 0.0
+            }
+        },
+        {
+            "name": "inlet_zone",
+            "type": "temp",
+            "inputs": ["inlet_temp"],
+            "setpoint": 40.0,
+            "pid": {
+                "samplePeriod": 1.0,
+                "proportionalCoeff": -5.0,
+                "integralCoeff": -0.5,
+                "feedFwdOffsetCoeff": 0.0,
+                "feedFwdGainCoeff": 0.0,
+                "integralLimit_min": 30.0,
+                "integralLimit_max": 100.0,
+                "outLim_min": 30.0,
+                "outLim_max": 100.0,
+                "slewNeg": -5.0,
+                "slewPos": 0.0
+            }
+        }
+    ]
+}

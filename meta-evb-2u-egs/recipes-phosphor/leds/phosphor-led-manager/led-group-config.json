@@ -1,0 +1,52 @@
+{
+    "leds": [
+        {
+            "group": "bmc_booted",
+            "members": [
+                {
+                    "Name": "status-green",
+                    "Action": "On",
+                    "Priority": "On",
+                    "DutyOn": 100,
+                    "Period": 0
+                }
+            ]
+        },
+        {
+            "group": "enclosure_identify",
+            "members": [
+                {
+                    "Name": "identify",
+                    "Action": "Blink",
+                    "Priority": "Blink",
+                    "DutyOn": 50,
+                    "Period": 500
+                }
+            ]
+        },
+        {
+            "group": "enclosure_fault",
+            "members": [
+                {
+                    "Name": "status-amber",
+                    "Action": "On",
+                    "Priority": "On",
+                    "DutyOn": 100,
+                    "Period": 0
+                }
+            ]
+        },
+        {
+            "group": "fan_fault",
+            "members": [
+                {
+                    "Name": "fan-fault",
+                    "Action": "On",
+                    "Priority": "On",
+                    "DutyOn": 100,
+                    "Period": 0
+                }
+            ]
+        }
+    ]
+}

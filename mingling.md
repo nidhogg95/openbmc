@@ -1,0 +1,1 @@
+pkill -9 qemu-system-arm 2>/dev/null; sleep 2; ps aux | grep qemu || echo "All QEMU processes terminated"
