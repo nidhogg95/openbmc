@@ -45,6 +45,7 @@
   - [§9.7 双 Flash A/B Bank 策略](#97-双-flash-ab-bank-策略)
   - [§9.8 实机常见故障排查](#98-实机常见故障排查)
   - [§9.9 面试加分点：实机经验总结](#99-面试加分点实机经验总结)
+  - [§9.10 ARM32 内存管理深度解析（面试杀手锏）](#910-arm32-内存管理深度解析面试杀手锏)
 
 ---
 
@@ -3832,7 +3833,10 @@ meta-evb-2u-egs/
 # EVB-2U-EGS kernel configuration fragment
 # Platform: AST2600 A1, Intel EGS 2U rack server
 
-# Large memory support (1GB DRAM)
+# 内存分割：3G 用户 / 1G 内核（3G_OPT 变体）
+# 真机有 2GB DRAM，默认 VMSPLIT_2G 会导致 vmalloc 空间不足，
+# SPI FMC 驱动无法映射 256MB AHB 窗口 → Kernel Panic。
+# 配合 U-Boot bootargs vmalloc=512M 使用。详见 §9.10。
 CONFIG_VMSPLIT_3G_OPT=y
 
 # I2C MUX: PCA9546 (bus0, bus3) + PCA9548 (bus3 NVMe)
@@ -4542,7 +4546,7 @@ SPL_BINARY = "spl/u-boot-spl.bin"
 
 > 💡 **大白话**：这就像你买了个电视机但遥控器是别的型号——按了开机键电视没反应，不是电视坏了，是遥控器发射的红外频率不对。`ast2600_openbmc_defconfig` 是 Intel 实机的"遥控器"，把信号发到了 UART5（实机上的调试串口）；QEMU 只"听" UART1。换成 `spl_defconfig` 就是拿对了遥控器。**教训：QEMU 调试和实机调试可能需要不同的 U-Boot 配置，这不是 bug，是架构设计。**
 
-**案例 B2：内核启动 panic — SPI Flash 内存映射失败**
+**案例 B2：内核启动 panic — SPI Flash 内存映射失败（QEMU 环境）**
 
 现象：
 U-Boot 正常启动，内核开始引导，但很快 kernel panic：
@@ -4552,18 +4556,18 @@ Kernel panic - not syncing: VFS: Unable to mount root fs
 ```
 
 根因分析：
-ASPEED AST2600 的 FMC（Flash Memory Controller）需要通过 AHB（Advanced High-speed Bus）将 SPI Flash 映射到 CPU 的虚拟地址空间。这个映射窗口需要约 256MB 的 vmalloc 空间。
+ASPEED AST2600 的 FMC（Flash Memory Controller）需要通过 AHB（Advanced High-speed Bus）将 SPI Flash 映射到 CPU 的虚拟地址空间。这个映射窗口最大需要 256MB 的 vmalloc 空间。
 
-`evb-2u-egs.cfg` 内核配置文件中设置了 `CONFIG_VMSPLIT_3G_OPT=y`，这将用户空间/内核空间的分割点设在 3G:1G，但这个 "OPT" 变体进一步压缩了 vmalloc 区域到约 240MB —— 不够 256MB 的 Flash 映射窗口。
+这个问题的解决方案取决于 **RAM 大小**：
 
-修复方法：
-从 `evb-2u-egs.cfg` 中删除 `CONFIG_VMSPLIT_3G_OPT=y`，使用内核默认的 `CONFIG_VMSPLIT_2G`（2G:2G 分割），vmalloc 空间充裕。
-```
-# 删除这一行：
-CONFIG_VMSPLIT_3G_OPT=y
-```
+| 环境 | RAM | 最佳方案 | 原因 |
+|------|-----|---------|------|
+| QEMU | 1GB | 使用默认 `VMSPLIT_2G` | 1GB RAM 直接映射只占一半内核空间，vmalloc 有 ~960MB，完全够用 |
+| 真机 | 2GB | `VMSPLIT_3G_OPT` + `vmalloc=512M` | 2GB RAM 把 VMSPLIT_2G 的内核空间挤满，必须改变分割比例并显式预留 vmalloc |
 
-> 💡 **大白话**：ARM 32位 Linux 把 4GB 虚拟地址空间切成两半——上面给内核用，下面给用户程序用。`VMSPLIT_3G_OPT` 是"多给用户程序一点，少给内核一点"的激进切法。问题是 ASPEED 的 SPI Flash 驱动是个"大胃王"，一张嘴就要 256MB 的内核地址空间来映射 Flash 芯片。你把内核地盘切太小了，大胃王吃不饱就 panic 了。解决方案：别这么抠门，给内核留够地方（用默认的 2G:2G）。**教训：嵌入式平台的内存分割策略必须考虑硬件外设的地址映射需求，不能照搬通用 Linux 桌面的经验。**
+在 QEMU 阶段，我们去掉了 `CONFIG_VMSPLIT_3G_OPT=y`，用默认的 `VMSPLIT_2G` 即可正常启动。但上真机后（2GB RAM），必须**反过来加回** `VMSPLIT_3G_OPT` 并配合 U-Boot bootargs `vmalloc=512M`。完整的真机故障排查过程见 §9.8 案件 8，原理详解见 §9.10。
+
+> 💡 **大白话**：ARM 32 位 Linux 把 4GB 虚拟地址空间切成两半，上面给内核用，下面给用户程序用。QEMU 只有 1GB RAM，默认切法（各 2GB）绰绰有余。但真机有 2GB RAM，2GB 的货要塞进 2GB 的仓库，SPI 驱动那 256MB 的"大件"就没地方放了。解决办法：换一种切法（VMSPLIT_3G_OPT），让多出的 RAM 走"二级仓库"（Highmem），主仓库里腾出空间给大件。**教训：同一个固件在 QEMU 和真机上的表现可能截然不同，RAM 大小就是最常见的差异源。**
 
 **案例 B3：SSH/BMCWeb 无法连接 — QEMU NIC 映射不匹配**
 
@@ -4750,7 +4754,7 @@ Q: 在 QEMU 中 BMC 的网络接口没有 IP 地址，但宿主机端口转发�
 A: 这是一个典型的"设备模型层 vs 设备树层"不匹配问题。QEMU 的 `-net nic` 按顺序连接到硬件模型的 NIC（mac0→mac1→mac2→mac3），但 Linux 内核只为 DTS 中 `status = "okay"` 的 NIC 创建网络接口。如果 DTS 只启用了 mac2/mac3 而 `-net nic,netdev=usernet` 连接到了 mac0，端口转发的网络后端就浪费了——Linux 内核根本看不见 mac0。解决方案是用多条空的 `-net nic` 跳过禁用的 NIC，让带后端的 NIC 落到 DTS 启用的位置上。这个问题揭示了虚拟化调试中硬件抽象层和软件配置层的分离本质。
 
 Q: 内核 panic 提示 SPI Flash 映射失败 ("Can't map window for chip")，但 U-Boot 阶段 Flash 读写正常，如何分析？
-A: U-Boot 运行在物理地址模式下，直接访问 SPI Flash 的 AHB 映射窗口。但 Linux 内核运行在虚拟地址模式下，需要通过 vmalloc 区域建立映射。如果内核的虚拟内存分割策略（如 `CONFIG_VMSPLIT_3G_OPT`）压缩了 vmalloc 空间到不足以容纳 Flash 映射窗口（AST2600 需要 ~256MB），映射就会失败。U-Boot 正常只是因为它根本不走 MMU 虚拟地址映射。解决方案是使用默认的 `VMSPLIT_2G` 或确保 vmalloc 空间充足。这个问题的核心是理解 bootloader 和内核的地址空间模型差异。
+A: U-Boot 运行在物理地址模式下，直接访问 SPI Flash 的 AHB 映射窗口。但 Linux 内核运行在虚拟地址模式下，需要通过 vmalloc 区域建立映射。如果物理 RAM 很大（如 2GB），默认的 `VMSPLIT_2G` 会导致直接映射占满内核空间，vmalloc 区域不足以容纳 Flash 映射窗口（AST2600 需要 ~256MB）。U-Boot 正常只是因为它根本不走 MMU 虚拟地址映射。解决方案是双管齐下：内核配置使用 `CONFIG_VMSPLIT_3G_OPT=y` 改变内存分割比例，同时 U-Boot bootargs 添加 `vmalloc=512M` 显式预留 vmalloc 空间。完整分析见 §9.10。这个问题的核心是理解 bootloader 和内核的地址空间模型差异，以及物理 RAM 大小对虚拟地址布局的影响。
 
 > 💡 **大白话**：这两道题是面试中展示"系统性思维"的绝佳素材。NIC 映射那题考的是"你是否理解虚拟化环境中硬件模拟和软件驱动是两个独立的层"；VMSPLIT 那题考的是"你是否理解 U-Boot 物理寻址和 Linux 虚拟寻址的根本区别"。两题都不是靠背答案能搞定的，面试官一追问就能看出你是真懂还是背的。
 
@@ -5678,10 +5682,13 @@ reboot
 # 原因: rootfs 分区未正确写入或 mtdparts 不匹配
 # 解决: 确认 static.mtd 完整烧入，fw_printenv 检查 bootargs
 
-# 类型2: "Unable to handle kernel paging request"
-# 原因: 可能是 CONFIG_VMSPLIT 设置问题
-# 解决: 确认 evb-2u-egs.cfg 中没有 CONFIG_VMSPLIT_3G_OPT=y
-#       （我们在 QEMU 调试阶段已经移除了这个选项）
+# 类型2: "vmalloc_node_range for size XXXXXXX failed" → SPI 驱动 probe 失败 → rootfs 挂载失败
+# 原因: 物理 RAM 大于 1GB 时，默认 VMSPLIT_2G 导致 vmalloc 空间不足，
+#       无法映射 AST2600 SPI FMC 的 256MB AHB 窗口
+# 解决: 
+#   1. 内核配置添加 CONFIG_VMSPLIT_3G_OPT=y（改变内存分割比例）
+#   2. U-Boot bootargs 添加 vmalloc=512M（显式预留 vmalloc 空间）
+#   详见 §9.10 ARM32 内存管理深度解析
 
 # 类型3: "Kernel panic - not syncing: Attempted to kill init!"
 # 原因: systemd/init 启动失败
@@ -5798,6 +5805,62 @@ busctl introspect xyz.openbmc_project.HwmonTempSensor \
 
 > 💡 **大白话**：真机报错就像病人描述症状。肚子痛（Kernel panic）可能是吃坏东西（分区烧错），也可能是阑尾炎（DTS配置不对）。我们千万不要只盯着一个错误盲猜，要学会开出 `dmesg`、`ethtool` 和 `i2cdetect` 这些化验单辅助定位，才能精确下刀。
 
+#### 案件 8：真实案例 — vmalloc 空间耗尽导致 Kernel Panic（本项目实录）
+
+这是我们在 evb-2u-egs 真机上遇到的真实故障，完整还原排障过程。
+
+**现象**：
+- 固件在 QEMU 上完美启动，SSH、BMCWeb 全部正常
+- 烧录到真机后，内核加载成功但立即 Kernel Panic，WDT 触发无限重启
+- 串口日志关键错误：
+
+```
+[    1.696292] vmalloc_node_range for size 268439552 failed:
+               Address range restricted to 0xf0800000 - 0xff800000
+[    1.709498] spi-aspeed-smc 1e620000.spi: missing AHB mapping window
+[    1.715876] spi-aspeed-smc 1e620000.spi: probe with driver spi-aspeed-smc failed with error -12
+...
+[    2.449]+  Kernel panic - not syncing: Attempted to kill init!
+```
+
+**分析过程**：
+
+| 步骤 | 操作 | 发现 |
+|------|------|------|
+| 1 | 对比 QEMU 和真机环境 | QEMU 默认: 1GB RAM / 真机: 2GB RAM |
+| 2 | 计算 vmalloc 可用空间 | `0xff800000 - 0xf0800000` = 240MB |
+| 3 | 查看 SPI 驱动请求大小 | `268439552` bytes = 256MB |
+| 4 | **256MB > 240MB → 分配失败！** | 根因确认 |
+| 5 | 搜索社区解决方案 | Facebook 16 个 AST2600 平台都用 `VMSPLIT_3G_OPT` + `vmalloc=768M` |
+
+**为什么 QEMU 没问题**：
+QEMU 只配了 1GB RAM，在 `VMSPLIT_2G`（内核空间 2GB）下，1GB 直接映射只占一半内核空间，vmalloc 有近 ~960MB 可用，256MB 轻松放下。真机 2GB RAM 把内核空间几乎挤满，vmalloc 只剩 240MB。
+
+**修复（两步缺一不可）**：
+
+```bash
+# 1. 内核配置 (recipes-kernel/linux/linux-aspeed/evb-2u-egs.cfg)
+#    添加:
+CONFIG_VMSPLIT_3G_OPT=y
+
+# 2. U-Boot 配置 (recipes-bsp/u-boot/u-boot-aspeed-sdk/evb-2u-egs.cfg)
+#    新建文件:
+CONFIG_USE_BOOTARGS=y
+CONFIG_BOOTARGS="console=ttyS4,115200n8 root=/dev/ram rw vmalloc=512M"
+
+# 3. 重新构建
+bitbake -c clean linux-aspeed u-boot-aspeed-sdk
+bitbake obmc-phosphor-image
+```
+
+**教训**：
+1. **QEMU 不能替代真机测试** — 内存大小差异就能导致完全不同的行为（但可以调整 QEMU 参数来复现，详见 §9.10.8）
+2. **看社区怎么做** — Facebook 十几个平台踩过的坑，就是最好的参考
+3. **错误信息要逐字分析** — `268439552` 和 `0xf0800000-0xff800000` 这些数字才是破案关键
+4. **先复现再修复** — 我们将 QEMU 调为 2G 后完美复现了 Panic，修复后同样在 QEMU 2G 下验证通过，给真机烧录提供了信心
+
+> 💡 **大白话**：这个 bug 就像租了个小仓库（vmalloc 240MB）去放一整集装箱的货（SPI 映射 256MB），门都塞不进去。解决办法：换个大仓库（VMSPLIT_3G_OPT 改变内存布局），再挂个"此处预留 512MB"的牌子（vmalloc=512M bootargs）。详细原理见 §9.10。
+
 ---
 
 ### §9.9 面试加分点：实机经验总结
@@ -5813,3 +5876,233 @@ busctl introspect xyz.openbmc_project.HwmonTempSensor \
 > 💡 **大白话**：简历上写"熟悉 OpenBMC"和"在多款服务器主板上完成 OpenBMC 从零移植与硬排障"，就像简历上写"会背菜谱"和"能一个人炒出一桌国宴"。面试官随便抛出个实操的边角料问题，你脱口而出的排障思路，就是最好的实力敲门砖。
 
 ---
+
+### §9.10 ARM32 内存管理深度解析（面试杀手锏）
+
+本节将深入探讨上文 Case 8 中 vmalloc 耗尽导致 Kernel Panic 的根本原因。这不仅是解决问题的记录，更是面试中证明你**懂底层**的杀手锏。
+
+#### §9.10.1 32 位地址空间分割
+
+ARM32 CPU 的总虚拟地址空间是 4GB（$2^{32}$ 字节）。Linux 内核将其划分为**用户空间**（User Space）和**内核空间**（Kernel Space）。
+
+不同的内核配置选项决定了这个 4GB 空间的分割比例：
+
+| 配置选项 | PAGE_OFFSET | 用户空间大小 | 内核空间大小 | 说明 |
+|----------|-------------|--------------|--------------|------|
+| **VMSPLIT_3G** | `0xC0000000` | 3GB | 1GB | 标准 Linux 默认，适合小内存设备 |
+| **VMSPLIT_2G** | `0x80000000` | 2GB | 2GB | OpenBMC ASPEED 默认，为了容纳更多设备映射 |
+| **VMSPLIT_3G_OPT** | `0xB0000000` | 2816MB | 1280MB | **我们的救星**，平衡了用户空间和内核空间的需求 |
+
+当设置 `CONFIG_VMSPLIT_3G_OPT=y` 时，内核空间从 `0xB0000000` 开始，大小为 1280MB。
+
+#### §9.10.2 内核虚拟地址空间完整布局
+
+在内核的这部分空间中，并非所有地址都用来映射物理内存。以 VMSPLIT_2G 为例，内核的 2GB 虚拟地址空间典型布局如下：
+
+```text
+0xFFFFFFFF ┬─────────────────────────┬
+           │  Vectors (异常向量表)    │
+           ├─────────────────────────┤
+           │  Fixmap (固定映射区)     │
+           ├─────────────────────────┤
+           │  PKMAP (永久内核映射)    │
+           ├─────────────────────────┤
+           │  kmap_atomic (临时映射)  │
+           ├─────────────────────────┤
+           │  VMALLOC 区             │ ← ioremap() 和 vmalloc() 分配于此！
+           ├─────────────────────────┤
+           │  Guard Hole (安全隔离带) │
+           ├─────────────────────────┤
+           │  Lowmem (直接映射区)     │ ← 大小取决于物理 RAM
+PAGE_OFFSET┴─────────────────────────┴
+```
+
+**重点注意**：`vmalloc` 区域（图中 VMALLOC 区）是内核用来分配**虚拟地址连续但物理地址不一定连续**的内存，同时也是 **设备寄存器映射（ioremap）** 的专用区域。加载内核模块（.ko）也在这里。
+
+#### §9.10.3 直接映射 (Lowmem) vs 高端内存 (Highmem)
+
+核心矛盾在于：**如果物理 RAM 的大小超过了内核直接映射区（Lowmem）的容量，多出来的内存该怎么办？**
+
+1. **直接映射 (Lowmem)**：
+   - 虚拟地址 = 物理地址 + `PAGE_OFFSET`。
+   - 映射是永久的，访问零开销。
+
+2. **高端内存 (Highmem)**：
+   - 当物理内存过大（如 2GB），无法全部塞进直接映射区时，超出部分成为 Highmem。
+   - Highmem **没有永久的虚拟地址**。内核需要访问它时，必须临时借用 PKMAP 或 `kmap_atomic` 区域映射，用完立刻释放（kunmap）。
+   - Highmem 的映射槽位极其有限（比如 PKMAP 只有 1024 个页），频繁映射会带来性能损耗，甚至死锁风险。
+
+> 💡 **大白话**：内核空间就像是员工的固定工位，物理内存就像是公司招的员工。如果工位够多（物理内存少），每个员工发一个固定工位（Lowmem）。如果员工太多（2GB RAM），工位坐不下了，多出来的员工只能当"走读生"（Highmem），需要用电脑时就临时去公共机房借用一台（kmap），用完马上让给别人。
+
+#### §9.10.4 AST2600 SPI FMC AHB 窗口机制
+
+AST2600 内部有一个 FMC（Flash Memory Controller），负责管理 SPI Flash。
+
+```text
+┌───────────────── AST2600 SoC ─────────────────┐
+│                                               │
+│  ┌──────────┐          ┌───────────────┐      │
+│  │   CPU    ├───AHB────┤     FMC       │      │
+│  └──────────┘          └─┬─┬─┬─┬───────┘      │
+│                          │ │ │ │              │
+└──────────────────────────┼─┼─┼─┼──────────────┘
+                           │ │ │ │
+                  CE0 ─────┘ │ │ └───── CE3
+                             ▼ ▼
+                       SPI Flash 芯片
+```
+
+为了让 CPU 能像读写普通内存一样读写 Flash，FMC 提供了一个**AHB Decode Window（内存映射 I/O 窗口）**。AST2600 支持多达 4 个片选（CE0-CE3），每个片选最大可分配 64MB 的寻址空间。
+
+4 个片选 × 64MB = **256MB**。
+
+当 `spi-aspeed-smc` 驱动加载时，它极其霸道地要求一次性 `ioremap()` 映射这完整的 256MB 窗口，以便完全控制所有可能的 Flash 区域。而 `ioremap()` 会从 `vmalloc` 区域划走这 256MB 的虚拟地址空间！
+
+#### §9.10.5 QEMU vs 真机内存差异
+
+为什么 QEMU（默认 1G）下风平浪静，真机却 Kernel Panic？因为它们的物理 RAM 大小不同，导致了 VMSPLIT_2G 下内存布局的剧变！（注：将 QEMU 内存调为 2G 后，同样会 Panic——详见 §9.10.8 的复现实验。）
+
+**QEMU (1GB RAM) + VMSPLIT_2G：**
+- 内核空间总量 = 2GB
+- 直接映射区 (Lowmem) 占去 1GB（存放物理内存）
+- 剩下的 1GB 空间，分配给 PKMAP、kmap 等杂项后，**vmalloc 区域还有约 960MB**。
+- SPI 驱动申请 256MB？随便拿，毫无压力！
+
+**真机 (2GB RAM) + VMSPLIT_2G：**
+- 内核空间总量 = 2GB
+- 直接映射区 (Lowmem) 试图映射整个 2GB 物理内存，把内核虚拟地址空间**直接撑爆**！
+- 系统不得不强行压缩直接映射区，勉强挤出一点点缝隙给 vmalloc。
+- 最终，**vmalloc 区域只剩下区区 240MB**（`0xf0800000 - 0xff800000`）。
+- SPI 驱动申请 256MB？直接越界报错：`vmalloc_node_range for size 268439552 failed`。
+
+如果 QEMU 启动时也加上 `-m 2G` 的参数，它同样会当场 Panic。
+
+#### §9.10.6 两个修复为什么缺一不可
+
+面对 vmalloc 空间不足，我们祭出了组合拳：
+
+1. **`CONFIG_VMSPLIT_3G_OPT=y` (内核编译时)**
+   - 这改变了红线（`PAGE_OFFSET`），将内核空间从 2GB 缩小到 1280MB。
+   - 听起来很矛盾？内核空间变小了，vmalloc 怎么反而够了？
+   - 因为在 1280MB 内核空间下，直接映射区（Lowmem）最多只能占不到 1GB（通常 700MB 左右）。剩下的 1.3GB 物理内存被无情地赶到了高端内存（Highmem）当走读生。
+   - 正因为大部分物理内存变成了无需永久映射的 Highmem，内核虚拟地址空间反而**腾出了一大块空地**。
+
+2. **`vmalloc=512M` (U-Boot 启动时)**
+   - 这是给内核下达的**强制圈地令**。
+   - 告诉内核："不管你直接映射区想占多大，必须给我死死划出 512MB 的虚拟地址空间留给 vmalloc 专用！"
+   - 这确保了即使内存布局发生波动，那 256MB 的 SPI AHB 窗口也绝对有地可落。
+
+社区中的老玩家 Facebook，在他们的 16 款 AST2600 平台上，清一色使用了 `VMSPLIT_3G_OPT=y` 配合更宽裕的 `vmalloc=768M`。这证明了这是业界标准的解决路径。
+
+#### §9.10.7 面试话术
+
+如果面试官问："你在嵌入式项目里，遇到过什么有趣的内存问题吗？"
+
+你可以这样娓娓道来：
+> "在我负责将 OpenBMC 移植到 evb-2u-egs 实机时，遇到了一个经典的内存空间布局问题。
+>
+> 现象是固件在 QEMU 里完美运行，但烧到实机后，内核刚启动就直接 Panic。我抓取了串口日志，发现是一行 `vmalloc_node_range failed`，紧接着是 spi-aspeed-smc 驱动报 `missing AHB mapping window`。
+>
+> 我立刻意识到这是虚拟地址空间耗尽了。AST2600 的 SPI 控制器为了支持全容量 Flash，要求映射高达 256MB 的 AHB 窗口。
+>
+> 可是为什么 QEMU 不报错？我对比了硬件配置，发现 QEMU 只有 1GB 内存，而我们的真机板载了 2GB。OpenBMC 默认使用了 `VMSPLIT_2G`，在 1GB RAM 下，直接映射区只吃掉一半的内核空间，vmalloc 有近 1GB 富余；但在 2GB RAM 下，直接映射区把 2GB 内核空间撑爆了，系统拼死挤出的 vmalloc 空间只剩 240MB，根本放不下 SPI 驱动要求的 256MB，所以当场挂掉。
+>
+> 我的修复方案是双管齐下：首先在内核配置加上 `CONFIG_VMSPLIT_3G_OPT=y`，将内核空间压缩到 1280MB，迫使超出的物理内存进入 Highmem，从而腾出虚拟地址空间；其次，在 U-Boot bootargs 里强行加上 `vmalloc=512M`，硬性划出安全区。
+>
+> 事后我查阅了 Meta 的 meta-facebook 源码，发现他们十几台 AST2600 机器全部采用了这个组合方案，这让我更加确信了这是 32位大内存 ARM 系统的标准解法。这个问题让我深刻理解了 Lowmem、Highmem 和 vmalloc 之间的此消彼长关系。"
+
+> 💡 **大白话**：这就像是你有一张 4 米长的办公桌（4GB虚拟空间）。
+>
+> 原来规定：左边 2 米给工人办公（用户空间），右边 2 米当仓库堆货（内核空间）。
+> 后来进了一大批货（2GB 物理内存），把右边 2 米全堆满了。这时候又来了一个必须放一起的超大号快递（SPI 256MB 连续映射），放不下了，系统直接崩溃。
+> 
+> 怎么办？
+> 第一步（VMSPLIT_3G_OPT）：重新划线！左边工人多占点（2.8米），右边仓库留少点（1.2米）。同时规定，大部分散货不能长期占位子了，统统搬去流动寄存柜（Highmem 高端内存）。
+> 第二步（vmalloc=512M）：在空出来的右边区域，用警戒线死死圈出一块半米长的区域（512MB），挂上牌子"超大号快递专用，闲杂货物禁止占用！"。
+> 
+> 这样，不管散货怎么折腾，大快递永远有地方放，问题完美解决。
+
+---
+
+#### §9.10.8 QEMU 2G 验证——修复确认
+
+修复方案提出后，我们不急着烧录真机。科学的做法是先在 QEMU 中**复现问题**，再**验证修复**。
+
+**第一步：复现（旧固件 + 2G RAM）**
+
+将 QEMU 内存从 1G 提升到 2G（`-m 2G`），运行修复前的旧固件：
+
+```
+vmalloc_node_range for size 268439552 failed: Address range restricted to 0xf0800000 - 0xff800000
+spi-aspeed-smc 1e620000.spi: missing AHB mapping window
+...
+Kernel panic - not syncing: Attempted to kill init!
+```
+
+✅ 与真机串口日志**完全一致**！这证明问题 100% 是内存布局导致，与硬件外设无关。
+
+**第二步：验证（新固件 + 2G RAM）**
+
+编译包含 `VMSPLIT_3G_OPT=y` + `vmalloc=512M` 的新固件，同样在 QEMU 2G 下运行：
+
+```
+Kernel command line: console=ttyS4,115200n8 root=/dev/ram rw vmalloc=512M
+Zone ranges:
+  Normal   [mem 0x80000000-0xaeffffff]     ← ~768MB Lowmem
+  HighMem  [mem 0xaf000000-0xfeffffff]     ← 剩余进 Highmem
+...
+spi-aspeed-smc 1e620000.spi: CE0 read buswidth:2 [0x203c0641]   ← SPI 驱动加载成功！
+5 fixed-partitions partitions found on MTD device bmc             ← MTD 分区正常！
+...
+Welcome to Phosphor OpenBMC!
+Hostname set to <evb-2u-egs>.
+...
+evb-2u-egs login:                                                 ← 系统正常启动！
+```
+
+✅ 所有核心服务正常运行：bmcweb、D-Bus、Entity Manager、Fan Control、SSH 全部就绪。
+
+**对比总结**：
+
+| 测试场景 | SPI 驱动 | MTD 分区 | rootfs 挂载 | systemd | 结果 |
+|----------|----------|----------|-------------|---------|------|
+| 旧固件 + 2G RAM | ❌ vmalloc 失败 | ❌ 无 | ❌ Panic | ❌ 未到达 | 💀 |
+| 新固件 + 2G RAM | ✅ CE0 正常 | ✅ 5 个分区 | ✅ 成功 | ✅ 全部正常 | 🎉 |
+
+> 💡 **大白话**：在真机上动烙铁之前，先在 QEMU 里把问题复现出来，再验证修复方案。这样做有三个好处：一是省去了每次烧录的等待时间（几分钟 vs 几秒钟），二是消除了"是不是其他硬件问题"的干扰因素，三是给你的分析增加了**铁证**——面试时说"我先在模拟器中复现，确认根因后再上真机验证"，这比"我直接改了烧了试了"高出不止一个段位。
+
+---
+
+### §9.11 QEMU vs 真机——配置差异全解析
+
+很多同学问：QEMU 和真机的配置到底有哪些差异？哪些测试结果在真机上仍然有效？这里做一个系统性的全面对比。
+
+#### 一致项（QEMU 验证结果可直接迁移到真机）
+
+| 项目 | QEMU | 真机 | 说明 |
+|------|------|------|------|
+| DRAM 大小 | 2 GiB (`-m 2G`) | 2 GiB | 已对齐，是本次 vmalloc 修复的关键 |
+| Flash 型号 | w25q512jv | w25q512jv | `fmc-model` 参数匹配 |
+| 串口控制台 | ttyS4@115200 | UART5/ttyS4@115200 | 一致 |
+| Kernel cmdline | `vmalloc=512M` | `vmalloc=512M` | 同一个固件 |
+| Kernel config | `VMSPLIT_3G_OPT=y` | `VMSPLIT_3G_OPT=y` | 同一个固件 |
+| 内核版本 | 6.18.21 | 6.18.21 | 同一个固件 |
+| systemd 服务栈 | 全部正常 | 预期正常 | 软件层完全相同 |
+
+#### 差异项（需要真机验证）
+
+| 项目 | QEMU | 真机 | 影响 |
+|------|------|------|------|
+| SoC 版本 | 通用 AST2600 | AST2600-**A3** | QEMU 不区分 A1/A3，功能等效 |
+| Flash 数量 | 1 颗 (64MB) | 2 颗 (128MB, A/B bank) | QEMU 不支持双 bank 切换 |
+| I2C 设备 | **无** | 26+ 设备 | 温度传感器、PSU、CPLD 全部需真机验证 |
+| GPIO | 基本寄存器模拟 | 47 个引脚 | 电源控制、LED 物理输出需真机 |
+| PECI | 不模拟 | CPU0=0x30, CPU1=0x31 | CPU 温度读取需真机 |
+| 网络 PHY | 虚拟 ftgmac100 | RTL8211E + NCSI | 真实网络拓扑需真机 |
+| x86-power-control | FAILED (无硬件) | 应正常 | 依赖 GPIO 硬件 |
+
+#### 面试加分话术
+
+> "在我的开发流程中，QEMU 验证和真机验证是互补的两个阶段。QEMU 擅长验证**软件栈层面**的正确性——内核启动、内存布局、文件系统挂载、systemd 服务启动。而真机验证覆盖**硬件交互层面**——I2C 设备通信、GPIO 电平控制、PECI 温度读取、网络 PHY 协商。我会先在 QEMU 中快速迭代，确认软件层面没有问题后，再烧录真机进行硬件集成测试。这种分层验证策略大大提升了开发效率，也减少了在真机上反复烧录的次数。"
+
+> 💡 **大白话**：QEMU 就像驾校的模拟器——方向盘、油门、刹车的操作逻辑和真车一模一样，但你不会真的撞到路灯。真机就像路考——你得应对真实的路况、红绿灯和行人。先在模拟器里练到不会犯低级错误，再上路考，通过率就高多了。
