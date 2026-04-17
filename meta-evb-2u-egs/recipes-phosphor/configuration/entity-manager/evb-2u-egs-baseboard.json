@@ -370,38 +370,6 @@
             "Type": "TMP75"
         },
         {
-            "Address": "0x48",
-            "Bus": 7,
-            "Name": "SYS_Board_Temp",
-            "Thresholds": [
-                {
-                    "Direction": "greater than",
-                    "Name": "upper critical",
-                    "Severity": 1,
-                    "Value": 85
-                },
-                {
-                    "Direction": "greater than",
-                    "Name": "upper non critical",
-                    "Severity": 0,
-                    "Value": 75
-                },
-                {
-                    "Direction": "less than",
-                    "Name": "lower non critical",
-                    "Severity": 0,
-                    "Value": 5
-                },
-                {
-                    "Direction": "less than",
-                    "Name": "lower critical",
-                    "Severity": 1,
-                    "Value": 0
-                }
-            ],
-            "Type": "TMP75"
-        },
-        {
             "Address": "0x4d",
             "Bus": 8,
             "Name": "Exhaust_Temp",
@@ -495,12 +463,12 @@
                     "Value": 0
                 }
             ],
-            "Type": "LM87"
+            "Type": "TMP75"
         },
         {
             "Address": "0x2e",
             "Bus": 7,
-            "Name": "SYS_HWMon_ADT7475",
+            "Name": "SYS_HWMon_ADT7468",
             "Thresholds": [
                 {
                     "Direction": "greater than",
@@ -527,7 +495,7 @@
                     "Value": 0
                 }
             ],
-            "Type": "ADT7475"
+            "Type": "TMP75"
         },
         {
             "Address": "0x10",

@@ -5863,6 +5863,117 @@ bitbake obmc-phosphor-image
 
 ---
 
+#### 案件 9：真实案例 — QEMU 验证通过，真机仍然 Panic（U-Boot 环境变量覆盖问题）
+
+这是案件 8 的**续集**。案件 8 的修复在 QEMU 上验证通过，但烧录到真机后，**同样的 Panic 再次出现**。
+
+**现象**：
+
+- 案件 8 的修复（`VMSPLIT_3G_OPT` + `CONFIG_BOOTARGS` 加入 `vmalloc=512M`）在 QEMU 2G 下验证通过
+- 烧录到真机，串口日志显示**完全相同的 Panic**，一字不差
+- 仔细对比内核命令行，发现关键差异：
+
+```
+# QEMU 启动时的内核命令行（正常）：
+Kernel command line: console=ttyS4,115200n8 root=/dev/ram rw vmalloc=512M
+
+# 真机启动时的内核命令行（有问题）：
+Kernel command line: console=ttyS4,115200n8 root=/dev/ram rw
+```
+
+`vmalloc=512M` 在真机上**凭空消失了**！
+
+**分析过程**：
+
+| 步骤 | 操作 | 发现 |
+|------|------|------|
+| 1 | 对比 QEMU 和真机的内核命令行 | 真机少了 `vmalloc=512M` |
+| 2 | 查看真机 U-Boot 启动日志 | `Loading Environment from SPI Flash... OK` |
+| 3 | 理解 U-Boot 环境变量机制 | Flash 里保存的旧 `bootargs` 覆盖了编译进去的默认值 |
+| 4 | 确认根因 | `CONFIG_BOOTARGS` 只是"默认值"，Flash 里有保存值时会被覆盖 |
+| 5 | 搜索可靠的修复方案 | 内核的 `CONFIG_CMDLINE_EXTEND` 在内核侧追加，不受 U-Boot 影响 |
+
+**根因详解——U-Boot 环境变量是怎么工作的**：
+
+U-Boot 有两套 bootargs 来源，优先级从高到低：
+
+```
+优先级 1（最高）：Flash 里保存的环境变量（env save 写入的）
+优先级 2（最低）：编译时写死的 CONFIG_BOOTARGS 默认值
+```
+
+真机上，Flash 里保存着**旧固件（AMI MegaRAC）时代的 bootargs**，没有 `vmalloc=512M`。U-Boot 一启动就从 Flash 读出这个旧值，直接覆盖了我们编译进去的新默认值。QEMU 没有这个问题，因为 QEMU 的 Flash 镜像是全新的，没有保存过任何环境变量，所以 U-Boot 只能用编译时的默认值。
+
+```
+真机启动流程：
+  U-Boot 上电
+    → 从 SPI Flash 读取环境变量（Loading Environment from SPI Flash... OK）
+    → 找到旧的 bootargs = "console=ttyS4,115200n8 root=/dev/ram rw"
+    → 用这个旧值启动内核（CONFIG_BOOTARGS 被忽略）
+    → 内核没有 vmalloc=512M → vmalloc 不够 → Panic
+
+QEMU 启动流程：
+  U-Boot 上电
+    → 从 Flash 读取环境变量（Flash 是全新的，没有保存值）
+    → 找不到保存的 bootargs → 使用 CONFIG_BOOTARGS 默认值
+    → 默认值里有 vmalloc=512M → 正常启动
+```
+
+**修复方案——让内核自己追加 vmalloc=512M**：
+
+不依赖 U-Boot 传参，改为在内核侧通过 `CONFIG_CMDLINE_EXTEND` 追加：
+
+```
+# 文件：meta-evb-2u-egs/recipes-kernel/linux/linux-aspeed/evb-2u-egs.cfg
+CONFIG_CMDLINE="vmalloc=512M"
+CONFIG_CMDLINE_EXTEND=y
+```
+
+`CONFIG_CMDLINE_EXTEND` 的作用：内核启动时，把 `CONFIG_CMDLINE` 里的内容**追加**到 U-Boot 传来的 bootargs 后面。无论 U-Boot 传什么、Flash 里保存了什么旧值，内核都会自己加上 `vmalloc=512M`。
+
+```
+修复后的真机启动流程：
+  U-Boot 上电
+    → 从 Flash 读取旧 bootargs = "console=ttyS4,115200n8 root=/dev/ram rw"
+    → 传给内核
+  内核启动
+    → 接收 U-Boot 的 bootargs
+    → 追加 CONFIG_CMDLINE = "vmalloc=512M"
+    → 最终命令行 = "console=ttyS4,115200n8 root=/dev/ram rw vmalloc=512M"
+    → 正常启动 ✅
+```
+
+**同时修复的问题——I2C bus10 引脚冲突**：
+
+真机日志里还有另一个错误：
+
+```
+[    1.228210] aspeed-g6-pinctrl: pin M24 already requested by 1e650010.mdio;
+               cannot claim for 1e78a580.i2c
+```
+
+这是 DTS 里 `&i2c10` 和 `&mdio2` 同时启用，但它们共用了同一个物理引脚 M24。`&mdio2` 是 mac2 网口的 PHY 管理总线，必须保留；`&i2c10` 是内部背板 CPLD 的访问总线，暂时禁用。
+
+修复：
+
+```dts
+/* 文件：aspeed-bmc-evb-2u-egs.dts */
+&i2c10 {
+    status = "disabled";  /* 原来是 "okay"，与 mdio2 引脚冲突，暂时禁用 */
+};
+```
+
+**教训**：
+
+1. **QEMU 通过 ≠ 真机通过** — QEMU 的 Flash 是全新的，真机的 Flash 可能有旧固件留下的环境变量
+2. **`CONFIG_BOOTARGS` 只是默认值** — 只要 Flash 里有保存的环境变量，它就会被覆盖
+3. **内核侧的修复比 U-Boot 侧更可靠** — `CONFIG_CMDLINE_EXTEND` 不受 U-Boot 环境变量影响
+4. **看内核命令行是排查 bootargs 问题的第一步** — 日志里 `Kernel command line:` 那一行，是 U-Boot 实际传给内核的值，和你以为的可能完全不同
+
+> 💡 **大白话**：你在工厂里给机器预设了一套操作参数（`CONFIG_BOOTARGS`），但这台机器之前被别人用过，他们把自己的参数保存在机器的记忆卡里（Flash 环境变量）。机器一开机，先读记忆卡，发现有保存的参数，就直接用了，完全无视你的预设。解决办法：不要依赖机器的记忆卡，改成在操作系统层面（内核）强制追加你需要的参数，这样不管记忆卡里存了什么，都能生效。
+
+---
+
 ### §9.9 面试加分点：实机经验总结
 
 面试官很清楚 QEMU 和真实硬件的巨大鸿沟。如果你的经验只停留在模拟器上，那在硬核的硬件架构提问前很容易露怯。这一章的每一个细节，在面试时都能让你脱颖而出，证明你不仅会敲键盘，还闻过松香的味道。
@@ -6106,3 +6217,809 @@ evb-2u-egs login:                                                 ← 系统正�
 > "在我的开发流程中，QEMU 验证和真机验证是互补的两个阶段。QEMU 擅长验证**软件栈层面**的正确性——内核启动、内存布局、文件系统挂载、systemd 服务启动。而真机验证覆盖**硬件交互层面**——I2C 设备通信、GPIO 电平控制、PECI 温度读取、网络 PHY 协商。我会先在 QEMU 中快速迭代，确认软件层面没有问题后，再烧录真机进行硬件集成测试。这种分层验证策略大大提升了开发效率，也减少了在真机上反复烧录的次数。"
 
 > 💡 **大白话**：QEMU 就像驾校的模拟器——方向盘、油门、刹车的操作逻辑和真车一模一样，但你不会真的撞到路灯。真机就像路考——你得应对真实的路况、红绿灯和行人。先在模拟器里练到不会犯低级错误，再上路考，通过率就高多了。
+
+---
+
+### §9.12 U-Boot 环境变量机制深度解析——为什么"修好了"还会 Panic
+
+本节是案件 9 的配套深度讲解。如果你只看案件 9 的结论，可能会觉得"加个 CONFIG_CMDLINE_EXTEND 就完了"。但如果你不理解背后的机制，下次遇到类似问题还是会懵。这一节把 U-Boot 环境变量的完整工作原理讲清楚。
+
+#### §9.12.1 U-Boot 的"记忆"在哪里
+
+U-Boot 是一个 Bootloader，它在内核启动之前运行，负责初始化硬件、加载内核、传递启动参数。它有一套自己的"配置系统"，叫做**环境变量（Environment Variables）**。
+
+这些环境变量存储在 Flash 的一个专用分区里（在我们的平台上是 `u-boot-env` 分区，64KB）。你可以把它理解成 U-Boot 的"记事本"——它会把用户设置过的所有配置都写在这里，下次开机时读出来继续用。
+
+```
+Flash 分区布局（简化版）：
+┌─────────────────┐ 0x00000000
+│   u-boot        │  512KB  ← U-Boot 程序本体
+├─────────────────┤ 0x00080000
+│   u-boot-env    │   64KB  ← 环境变量保存在这里 ★
+├─────────────────┤ 0x00090000
+│   kernel        │         ← 内核
+├─────────────────┤
+│   rootfs        │         ← 根文件系统
+└─────────────────┘
+```
+
+#### §9.12.2 bootargs 的两个来源和优先级
+
+内核启动时需要一个"启动参数"（bootargs），告诉内核用哪个串口、挂载哪个根文件系统等。这个参数有两个来源：
+
+**来源1：编译时写死的默认值（`CONFIG_BOOTARGS`）**
+
+在 U-Boot 的配置文件里（我们的 `evb-2u-egs.cfg`）：
+
+```
+CONFIG_USE_BOOTARGS=y
+CONFIG_BOOTARGS="console=ttyS4,115200n8 root=/dev/ram rw vmalloc=512M"
+```
+
+这个值被编译进 U-Boot 的二进制文件里。如果 Flash 里没有保存过环境变量，U-Boot 就用这个默认值。
+
+**来源2：Flash 里保存的环境变量**
+
+如果有人曾经在 U-Boot 命令行里执行过：
+
+```
+setenv bootargs "console=ttyS4,115200n8 root=/dev/ram rw"
+saveenv
+```
+
+那么这个值就被写入了 Flash 的 `u-boot-env` 分区。下次开机，U-Boot 读到这个保存的值，就会**忽略编译时的默认值**，直接用 Flash 里的。
+
+**优先级规则**：
+
+```
+Flash 里有保存的值？
+  ├── 是 → 用 Flash 里的值（忽略 CONFIG_BOOTARGS）
+  └── 否 → 用 CONFIG_BOOTARGS 默认值
+```
+
+#### §9.12.3 为什么 QEMU 和真机行为不同
+
+这就是案件 9 的核心谜题。
+
+**QEMU 的情况**：
+
+我们给 QEMU 提供的 Flash 镜像（`obmc-phosphor-image-evb-2u-egs.static.mtd`）是刚构建出来的全新镜像。`u-boot-env` 分区里全是 `0xFF`（Flash 擦除后的默认值），没有任何保存的环境变量。
+
+U-Boot 读取 `u-boot-env` 分区，发现全是 `0xFF`，判断"没有保存过环境变量"，于是使用 `CONFIG_BOOTARGS` 默认值，其中包含 `vmalloc=512M`。
+
+**真机的情况**：
+
+真机的 Flash 里之前运行的是 AMI MegaRAC 固件。AMI 的 U-Boot 在某个时刻执行过 `saveenv`，把它自己的 bootargs 写入了 `u-boot-env` 分区。
+
+我们烧录新固件时，烧录的是 `static.mtd` 镜像，这个镜像**不包含 `u-boot-env` 分区**（因为 `u-boot-env` 是运行时动态写入的，不在静态镜像里）。所以 Flash 里的 `u-boot-env` 分区保持原样，里面还是 AMI 时代保存的旧 bootargs，没有 `vmalloc=512M`。
+
+```
+真机 Flash 状态（烧录新固件后）：
+┌─────────────────┐
+│   u-boot        │  ← 新固件的 U-Boot（有 CONFIG_BOOTARGS 含 vmalloc=512M）
+├─────────────────┤
+│   u-boot-env    │  ← 旧 AMI 时代保存的 bootargs（没有 vmalloc=512M）★ 问题在这里
+├─────────────────┤
+│   kernel        │  ← 新固件的内核
+├─────────────────┤
+│   rootfs        │  ← 新固件的根文件系统
+└─────────────────┘
+```
+
+U-Boot 启动，读取 `u-boot-env`，发现有保存的值，直接用旧 bootargs，`vmalloc=512M` 消失，Panic。
+
+#### §9.12.4 三种修复思路的对比
+
+遇到这类问题，有三种思路，各有优劣：
+
+**思路1：擦除 Flash 里的旧环境变量**
+
+在 U-Boot 命令行里执行：
+
+```
+env default -a    # 恢复所有环境变量为默认值
+saveenv           # 把默认值写回 Flash
+```
+
+或者用 SPI 编程器直接擦除 `u-boot-env` 分区。
+
+- 优点：干净彻底，Flash 里的旧值被清除
+- 缺点：需要能进入 U-Boot 命令行（需要在倒计时时按任意键），或者需要 SPI 编程器；每次换新板子都要手动操作
+
+**思路2：修改 U-Boot 配置，强制不从 Flash 读取环境变量**
+
+在 U-Boot 配置里禁用 Flash 环境变量：
+
+```
+# 不推荐，会丢失 A/B bank 切换等功能
+CONFIG_ENV_IS_NOWHERE=y
+```
+
+- 优点：彻底解决问题
+- 缺点：U-Boot 的 A/B bank 切换、MAC 地址保存等功能依赖环境变量，禁用后这些功能全部失效
+
+**思路3（我们采用的方案）：在内核侧追加参数**
+
+在内核配置里加：
+
+```
+CONFIG_CMDLINE="vmalloc=512M"
+CONFIG_CMDLINE_EXTEND=y
+```
+
+`CONFIG_CMDLINE_EXTEND` 的工作原理：内核启动时，先接收 U-Boot 传来的 bootargs，然后把 `CONFIG_CMDLINE` 里的内容**追加**到末尾。
+
+```
+U-Boot 传来：console=ttyS4,115200n8 root=/dev/ram rw
+内核追加：   vmalloc=512M
+最终结果：   console=ttyS4,115200n8 root=/dev/ram rw vmalloc=512M
+```
+
+- 优点：不依赖 U-Boot 环境变量，不需要手动操作，对所有板子都有效
+- 缺点：如果 U-Boot 传来的 bootargs 里已经有 `vmalloc=XXX`，会出现两个 vmalloc 参数（内核取最后一个，所以不会出错，但不够干净）
+
+对于我们的场景，思路3是最合适的：不需要手动操作每块板子，对新板子和旧板子都有效。
+
+#### §9.12.5 如何验证修复是否生效
+
+烧录新固件后，通过串口观察内核启动日志，找到这一行：
+
+```
+Kernel command line: console=ttyS4,115200n8 root=/dev/ram rw vmalloc=512M
+```
+
+如果 `vmalloc=512M` 出现在命令行里，修复生效。如果没有，说明 `CONFIG_CMDLINE_EXTEND` 没有编译进内核，需要检查 `.cfg` 文件是否被正确应用。
+
+也可以在 BMC 启动后登录，执行：
+
+```bash
+cat /proc/cmdline
+```
+
+输出应该包含 `vmalloc=512M`。
+
+#### §9.12.6 面试话术
+
+> "我们在 evb-2u-egs 移植过程中遇到过一个典型的 QEMU 通过、真机失败的案例。根因是 U-Boot 环境变量的优先级机制：Flash 里保存的旧 bootargs 会覆盖编译时的 CONFIG_BOOTARGS 默认值。QEMU 使用全新 Flash 镜像所以没有这个问题，但真机 Flash 里有旧固件留下的环境变量。我们的修复方案是使用内核的 CONFIG_CMDLINE_EXTEND，在内核侧追加必要的参数，完全绕过 U-Boot 环境变量的影响，对所有板子都有效，不需要手动操作。"
+
+> 💡 **大白话**：你给新员工发了一本操作手册（`CONFIG_BOOTARGS`），但这台机器之前的操作员在便利贴上写了自己的操作步骤，贴在机器上（Flash 里保存的旧环境变量）。新员工一来，先看到便利贴，就按便利贴操作了，根本没翻你的手册。解决办法：不要依赖手册，改成在机器的操作系统里写死一条规则（`CONFIG_CMDLINE_EXTEND`），不管便利贴写了什么，这条规则永远生效。
+
+---
+
+## §10. 真机调试实战：evb-2u-egs 第一次开机（2026-04-16）
+
+本章记录 evb-2u-egs 真机首次成功启动 OpenBMC 后的调试过程，涵盖网络不通、传感器 probe 失败等典型问题的完整诊断和修复流程。
+
+---
+
+### §10.1 真机首次启动状态
+
+烧录固件后，真机串口日志（`com20_3.log`）显示系统**成功启动**，无 Kernel Panic。核心服务全部正常：
+
+```
+[  OK  ] Started bmcweb server.
+[  OK  ] Started Phosphor-Pid-Control Margin-based Fan Control Daemon.
+[  OK  ] Started Entity Manager.
+[  OK  ] Started Intel Power Control for the Host 0.
+```
+
+但存在以下问题需要修复：
+
+| 问题 | 日志 | 严重程度 |
+|------|------|---------|
+| BMC 网口灯不亮，无法联网 | `ftgmac100 1e670000: Failed to connect to phy` | P1 |
+| ADT7468 传感器 probe 失败 | `adt7475 7-002e: probe failed with error -110` | P1 |
+| lm75@7-0048 超时 | `lm75 7-0048: probe failed with error -110` | P2 |
+| Flash CS1 无法识别 | `spi-nor spi0.1: unrecognized JEDEC id bytes: 00 00 00 00 00 00` | P3 |
+
+---
+
+### §10.2 问题一：BMC 网口灯不亮
+
+#### §10.2.1 诊断过程
+
+**第一步：确认网络接口状态**
+
+```bash
+root@evb-2u-egs:~# ip link show
+# 只有 eth0（NCSI 口），没有 eth1（RGMII 独立管理口）
+# eth0 的 carrier=1 是 NCSI fixed PHY 的假链路，主机关机时无法通信
+
+root@evb-2u-egs:~# ls /sys/bus/mdio_bus/devices/
+fixed-0:00   # 只有 fixed PHY，没有真实 PHY
+```
+
+**第二步：确认 MDIO 总线上没有 PHY**
+
+```bash
+root@evb-2u-egs:~# for i in $(seq 0 7); do
+    echo -n "PHY addr $i: "
+    cat /sys/bus/mdio_bus/devices/1e650010.mdio-1\:0$i/phy_id 2>/dev/null || echo "not found"
+done
+# 全部 not found → PHY 不响应 MDIO
+```
+
+**第三步：尝试读取 PHY reset GPIO**
+
+```bash
+root@evb-2u-egs:~# gpioget gpiochip0 111
+gpioget: error reading GPIO values: Device or resource busy
+# GPIO 111 被 gpio-hog 占用，无法直接读取
+```
+
+**第四步：审查 DTS 中的 gpio-hog 配置**
+
+```dts
+/* 错误配置 */
+phy-reset-hog {
+    gpio-hog;
+    gpios = <ASPEED_GPIO(N, 7) GPIO_ACTIVE_LOW>;
+    output-high;   ← BUG：逻辑高 + 低电平有效 = 物理低 = PHY 复位！
+    line-name = "RST_RGMII_PHYRST_N";
+};
+```
+
+#### §10.2.2 根因分析：GPIO 极性陷阱
+
+`GPIO_ACTIVE_LOW` 表示该信号**低电平有效**（active-low）。`output-high/low` 描述的是**逻辑电平**，不是物理电平。
+
+| DTS 配置 | 逻辑电平 | 物理电平 | 效果 |
+|---------|---------|---------|------|
+| `GPIO_ACTIVE_LOW` + `output-high` | 逻辑高 | **物理低** | PHY 持续复位 ❌ |
+| `GPIO_ACTIVE_LOW` + `output-low` | 逻辑低 | **物理高** | PHY 正常工作 ✅ |
+| `GPIO_ACTIVE_HIGH` + `output-high` | 逻辑高 | 物理高 | PHY 正常工作 ✅ |
+| `GPIO_ACTIVE_HIGH` + `output-low` | 逻辑低 | 物理低 | PHY 持续复位 ❌ |
+
+**规律**：信号名带 `_N` 后缀（active-low）时，要让 PHY 正常工作（物理高电平），应该写 `output-low`。
+
+#### §10.2.3 修复
+
+```dts
+/* 修复后 */
+phy-reset-hog {
+    gpio-hog;
+    gpios = <ASPEED_GPIO(N, 7) GPIO_ACTIVE_LOW>;
+    output-low;   ← 逻辑低 = 物理高 = PHY 正常工作
+    line-name = "RST_RGMII_PHYRST_N";
+};
+```
+
+#### §10.2.4 AST2600 MDIO/MAC 架构说明
+
+AST2600 有 4 个 MAC（mac0-mac3）和 4 个独立 MDIO 控制器（mdio0-mdio3）。命名存在偏移：
+
+| DTS 标签 | 硬件地址 | 对应 MDIO | 说明 |
+|---------|---------|---------|------|
+| `&mac0` | `1e660000` | mdio0 | 通常禁用 |
+| `&mac1` | `1e680000` | mdio1 | 通常禁用 |
+| `&mac2` | `1e670000` | mdio2 | **BMC 独立管理口（RGMII）** |
+| `&mac3` | `1e690000` | mdio3 | **NCSI 共享口（RMII）** |
+
+`ftgmac100` 驱动的 PHY 连接流程：
+1. 检查 DTS 是否有 `use-ncsi` → 是则注册 fixed PHY，走 NCSI 路径
+2. 检查 DTS 是否有 `phy-handle` → 是则通过 `of_phy_get_and_connect()` 连接外部 PHY
+3. 外部 PHY 通过 MDIO 总线发现，PHY 必须处于非复位状态才能响应 MDIO 读写
+
+#### §10.2.5 NCSI 协议说明
+
+NCSI（Network Controller Sideband Interface）是一种让 BMC 通过主机 NIC 的 sideband 通道访问网络的协议。
+
+```
+主机 NIC ←→ NCSI 通道 ←→ BMC mac3
+```
+
+**主机关机时 NCSI 不可用的原因**：
+- NCSI 通道由主机 NIC 的固件维护
+- 主机关机时 NIC 固件停止运行，NCSI 通道消失
+- BMC 的 `ftgmac100 eth0: NCSI: No channel found to configure!` 就是这个原因
+
+**结论**：BMC 的管理 IP 应该配置在独立管理口（RGMII/eth1）上，不依赖主机状态。NCSI 口（eth0）可以作为备用或用于带内管理。
+
+---
+
+### §10.3 问题二：ADT7468 传感器 probe 失败（-110 超时）
+
+#### §10.3.1 诊断过程
+
+串口日志时序：
+
+```
+[  6.5s] adt7475 7-002e: Error configuring attenuator bypass
+[  18.0s] adt7475 7-002e: ADT7475 device, revision 2   ← 11.5秒后才检测到
+[  19.0s] adt7475 7-002e: probe with driver adt7475 failed with error -110
+```
+
+11.5 秒的间隔是 I2C 写操作超时的典型特征（多次重试）。
+
+真机 `i2cdetect -y 7` 结果：
+
+```
+     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
+00:
+20:                               UU
+50: 50                   58
+```
+
+- `0x2d`（UU）= LM87，已被驱动占用，地址正确
+- `0x2e` = **不存在**（adt7475 probe 失败后设备被释放）
+- `0x50` = PSU FRU EEPROM（i2cdump 确认为 "GREAT WALL CRPS1600D"）
+- `0x58` = PSU1 PMBus
+
+#### §10.3.2 根因：compatible 字符串错误
+
+硬件文档记录 bus7/0x2e 是 **ADT7468** 芯片。查看内核 `adt7475.c` 的 `detect()` 函数：
+
+```c
+devid = adt7475_read(REG_DEVID);
+if (devid == 0x73)
+    name = "adt7473";
+else if (devid == 0x75 && client->addr == 0x2e)
+    name = "adt7475";
+else if (devid == 0x76)
+    name = "adt7476";    ← ADT7468 的 devid = 0x76
+else if ((devid2 & 0xfc) == 0x6c)
+    name = "adt7490";
+```
+
+ADT7468 的 devid = 0x76，对应驱动中的 `adt7476`。DTS 中写 `adi,adt7475` 会让驱动用 adt7475 的 probe 路径，写 REG_CONFIG2 时芯片行为不同，导致 I2C 超时（-110）。
+
+#### §10.3.3 如何通过 i2cdump 确认芯片型号
+
+```bash
+# 读取 ADT74xx 系列的关键寄存器
+# REG_VENDID = 0x3E（Analog Devices = 0x41）
+# REG_DEVID  = 0x3D（0x73=adt7473, 0x75=adt7475, 0x76=adt7476/ADT7468）
+# REG_DEVID2 = 0x3F
+
+i2cget -y 7 0x2e 0x3E   # Vendor ID，应为 0x41
+i2cget -y 7 0x2e 0x3D   # Device ID，0x76 = ADT7468/ADT7476
+i2cget -y 7 0x2e 0x3F   # Device ID2，低3位为 revision
+```
+
+#### §10.3.4 ADT74xx 系列寄存器差异
+
+| 芯片 | devid | 主要差异 | DTS compatible |
+|------|-------|---------|---------------|
+| ADT7473 | 0x73 | 3通道温度，3路PWM | `adi,adt7473` |
+| ADT7475 | 0x75 | 同上 + 电压监控 | `adi,adt7475` |
+| ADT7476/ADT7468 | 0x76 | 同上 + in0/in4 电压 | `adi,adt7476` |
+| ADT7490 | devid2[7:2]=0x6c | 最全功能版本 | `adi,adt7490` |
+
+#### §10.3.5 修复
+
+```dts
+/* 修复前 */
+adt7475@2e {
+    compatible = "adi,adt7475";
+    reg = <0x2e>;
+};
+
+/* 修复后 */
+adt7468@2e {
+    compatible = "adi,adt7476";   ← ADT7468 与 ADT7476 寄存器兼容
+    reg = <0x2e>;
+};
+```
+
+---
+
+### §10.4 问题三：lm75@7-0048 地址不存在
+
+真机 `i2cdetect -y 7` 确认 bus7 上 0x48 地址无设备。
+
+根据硬件定义文档，`lm75@0x48` 实际在 **bus3 MUX 下游 CH1**（需要先切换 PCA9546 MUX 到 CH1 才能访问），不在 bus7 直连。DTS 中 bus7 直接配置 `lm75@48` 是错误的。
+
+**修复**：删除 bus7 中的 `lm75@48` 节点。bus3 MUX 下游的 lm75 已在 `i2c3_mux0_ch1` 中正确配置。
+
+---
+
+### §10.5 真机调试方法论总结
+
+#### §10.5.1 诊断工具链
+
+```bash
+# 1. 查看内核启动日志（最重要）
+dmesg | grep -E "i2c|phy|eth|mac|ftgmac|adt|lm75|pmbus"
+
+# 2. 确认 I2C 总线上的实际设备
+i2cdetect -y <bus>
+# UU = 被驱动占用（地址正确）
+# 数字 = 设备存在，无驱动
+# 空白 = 无设备
+
+# 3. 读取设备寄存器（确认芯片型号）
+i2cdump -y <bus> <addr> b
+i2cget -y <bus> <addr> <reg>
+
+# 4. 查看网络接口
+ip link show
+ls /sys/bus/mdio_bus/devices/
+
+# 5. 查看 GPIO 状态
+gpioinfo gpiochip0 | grep -v "unnamed"
+# gpio-hog 占用的引脚会显示 "kernel" 标志
+```
+
+#### §10.5.2 串口日志时序分析
+
+| 时序特征 | 含义 |
+|---------|------|
+| 设备检测到但 probe 失败，间隔 10+ 秒 | I2C 写操作超时（多次重试） |
+| 设备立即 probe 失败（< 1秒） | 地址不存在或 compatible 不匹配 |
+| `UU` 出现在 i2cdetect | 驱动已加载，设备正常 |
+| `probe failed with error -110` | ETIMEDOUT，I2C 总线超时 |
+| `probe failed with error -22` | EINVAL，参数错误（如 PHY 找不到） |
+| `probe failed with error -6` | ENXIO，设备不存在 |
+
+#### §10.5.3 GPIO hog 调试技巧
+
+gpio-hog 占用的引脚无法用 `gpioget` 读取，但可以通过以下方式间接判断：
+
+```bash
+# 查看 gpio-hog 配置（内核启动时打印）
+dmesg | grep "gpio-hog\|hog"
+
+# 查看 GPIO 占用情况
+gpioinfo gpiochip0 | grep "kernel"
+
+# 通过外设行为推断（如 PHY 不响应 MDIO → PHY 在复位）
+ls /sys/bus/mdio_bus/devices/
+```
+
+#### §10.5.4 面试话术
+
+> "在 evb-2u-egs 真机调试中，我遇到过一个 GPIO 极性陷阱：DTS 中 PHY reset 信号配置了 `GPIO_ACTIVE_LOW` + `output-high`，看起来是'输出高电平'，但实际上 `GPIO_ACTIVE_LOW` 表示低电平有效，`output-high` 是逻辑高，对应的物理电平是低，导致 PHY 芯片持续处于复位状态，MDIO 总线上找不到任何 PHY，网口灯完全不亮。诊断过程是：串口日志看到 `Failed to connect to phy` → 扫描 MDIO 总线确认无 PHY → 尝试读取 GPIO 发现被 hog 占用 → 审查 DTS 发现极性配置错误。修复只需要把 `output-high` 改成 `output-low`。"
+
+> 💡 **大白话**：信号名叫 `RST_PHYRST_N`，`_N` 说明低电平才是'复位'。你想让 PHY 工作，就要让引脚保持高电平。但 DTS 里写的是'逻辑高'，而这个引脚是'低电平有效'，逻辑高对应物理低，结果 PHY 一直被按着复位键。改成'逻辑低'，物理引脚就变成高电平，PHY 才能正常工作。
+
+---
+
+## §11. entity-manager 配置深度解析
+
+本章以 evb-2u-egs 为例，系统讲解 entity-manager JSON 配置的工作机制、传感器类型映射、以及常见陷阱。
+
+---
+
+### §11.1 entity-manager 的角色
+
+entity-manager 是 OpenBMC 的**系统配置管理器**，负责：
+1. 读取 JSON 配置文件，发布到 D-Bus（`xyz.openbmc_project.Configuration.*` 接口）
+2. 对于需要动态实例化的设备，写入 `/sys/bus/i2c/devices/i2c-$Bus/new_device` 来创建内核驱动
+3. 作为 dbus-sensors 守护进程的配置源
+
+```
+JSON 文件 → entity-manager → D-Bus 配置接口
+                                    ↓
+                    hwmontempsensor / psusensor / adcsensor / intelcpusensor
+                                    ↓
+                    /xyz/openbmc_project/sensors/* (传感器值)
+                                    ↓
+                    Redfish / IPMI SDR / phosphor-pid-control
+```
+
+---
+
+### §11.2 JSON 文件结构
+
+```json
+{
+    "Name": "evb-2u-egs Baseboard",
+    "Probe": "TRUE",
+    "Type": "Board",
+    "Exposes": [
+        {
+            "Type": "TMP75",
+            "Name": "Inlet_Temp",
+            "Bus": 21,
+            "Address": "0x48",
+            "Thresholds": [...]
+        },
+        ...
+    ],
+    "xyz.openbmc_project.Inventory.Decorator.Asset": {
+        "Manufacturer": "",
+        "Model": "EVB-2U-EGS-MB"
+    }
+}
+```
+
+**关键字段：**
+
+| 字段 | 说明 |
+|------|------|
+| `Probe` | 触发条件。`"TRUE"` 表示始终加载；也可以是 D-Bus 路径或 FRU 匹配条件 |
+| `Type`（顶层） | 板卡类型，通常为 `"Board"` |
+| `Exposes` | 该板卡暴露的所有设备/传感器列表 |
+| `Exposes[].Type` | 设备类型，决定由哪个 dbus-sensors 守护进程处理 |
+| `Exposes[].Name` | 传感器名称，出现在 D-Bus 路径中 |
+| `Exposes[].Bus` | I2C 总线号（对应 `/dev/i2c-N`） |
+| `Exposes[].Address` | I2C 设备地址（十六进制字符串） |
+| `Exposes[].Thresholds` | 告警阈值（upper/lower critical/non-critical） |
+
+---
+
+### §11.3 两种设备实例化路径
+
+#### 路径1：DTS 已实例化 + dbus-sensors 读取（主流路径）
+
+对于 DTS 中已配置的设备（如 `lm75@4d`, `adt7476@2e`），内核启动时已自动创建 hwmon 目录。dbus-sensors 守护进程扫描 D-Bus 上的 entity-manager 配置，找到匹配的 Bus/Address，读取 hwmon 文件。
+
+```
+DTS: lm75@4d → 内核驱动 → /sys/class/hwmon/hwmon2/temp1_input
+JSON: {"Type": "TMP75", "Bus": 8, "Address": "0x4d"}
+hwmontempsensor: 扫描 D-Bus → 找到 TMP75 配置 → 读取 hwmon 文件 → 发布到 D-Bus
+```
+
+#### 路径2：entity-manager 主动实例化（`devices.hpp` ExportTemplate）
+
+对于 DTS 中**没有**配置的设备，entity-manager 通过写 `new_device` 来动态创建内核驱动。`devices.hpp` 中定义了支持的类型：
+
+```cpp
+// entity-manager/src/entity_manager/devices.hpp
+constexpr auto exportTemplates = std::to_array<ExportTemplate>({
+    {"PCA9546Mux", "pca9546 $Address", "/sys/bus/i2c/devices/i2c-$Bus",
+     "new_device", "delete_device", createsHWMon::noHWMonDir},
+    {"EEPROM", "eeprom $Address", "/sys/bus/i2c/devices/i2c-$Bus",
+     "new_device", "delete_device", createsHWMon::noHWMonDir},
+    // ... 约30种类型
+});
+```
+
+**注意**：`ADT7475`, `LM87`, `TMP75`, `pmbus` **不在** `devices.hpp` 中，因为这些设备通过 DTS 实例化，不需要 entity-manager 动态创建。
+
+---
+
+### §11.4 dbus-sensors 守护进程与 Type 的对应关系
+
+| JSON Type | 处理守护进程 | 说明 |
+|-----------|------------|------|
+| `TMP75`, `LM75A`, `TMP112`, `TMP421`, `MAX31725`, `EMC1412` 等 | `hwmontempsensor` | 通过 hwmon 读取温度 |
+| `ADC` | `adcsensor` | 内部 ADC，通过 IIO 读取 |
+| `pmbus` | `psusensor` | PMBus 电源传感器 |
+| `XeonCPU` | `intelcpusensor` | PECI 接口 CPU 温度 |
+| `Pid`, `Pid.Zone`, `Stepwise` | `phosphor-pid-control` | 风扇 PID 控制 |
+| `PCA9546Mux`, `PCA9548Mux` | entity-manager 直接处理 | 写 new_device 实例化 |
+| `EEPROM` | entity-manager 直接处理 | 写 new_device 实例化 |
+| `AD5593R` | 无标准守护进程 | 需要自定义传感器读取 |
+
+**重要陷阱**：`ADT7475` 和 `LM87` **不在** hwmontempsensor 的支持列表中！如果 JSON 中写 `"Type": "ADT7475"`，hwmontempsensor 会忽略它，传感器数据不会出现在 D-Bus 上。
+
+**正确做法**：对于 DTS 中已实例化的 ADT7476/LM87，JSON 中应使用 `"Type": "TMP75"`，hwmontempsensor 会通过 Bus/Address 找到对应的 hwmon 目录并读取温度。
+
+---
+
+### §11.5 MUX 下游总线编号
+
+evb-2u-egs DTS 中定义了 I2C 别名：
+
+```dts
+aliases {
+    i2c20 = &i2c3_mux0_ch0; /* bus3 mux0x73 CH0: AD5593R sensors */
+    i2c21 = &i2c3_mux0_ch1; /* bus3 mux0x73 CH1: LM75 inlet */
+    i2c22 = &i2c3_mux0_ch2; /* bus3 mux0x73 CH2: MB LM75 in/out */
+    i2c23 = &i2c0_mux0_ch0; /* bus0 mux0x73 CH0: front CPLD */
+    ...
+};
+```
+
+entity-manager JSON 中使用这些别名编号：
+
+```json
+{"Type": "TMP75", "Bus": 21, "Address": "0x48", "Name": "Inlet_Temp"}
+// Bus 21 = i2c21 = bus3 MUX CH1 下游
+```
+
+**规律**：MUX 下游总线的编号 = DTS aliases 中定义的 i2cN 编号。
+
+---
+
+### §11.6 evb-2u-egs JSON 配置说明
+
+当前 `evb-2u-egs-baseboard.json` 包含 37 个 Exposes：
+
+| 类型 | 数量 | 说明 |
+|------|------|------|
+| `ADC` | 16 | 内部 ADC 通道（adc0/adc1 各8路） |
+| `TMP75` | 7 | 温度传感器（含 LM87@0x2d 和 ADT7468@0x2e 用 TMP75 类型） |
+| `pmbus` | 2 | PSU1/PSU2 PMBus |
+| `XeonCPU` | 2 | CPU0/CPU1 PECI |
+| `PCA9546Mux` | 2 | bus0 和 bus3 的 PCA9546 MUX |
+| `PCA9548Mux` | 1 | bus3 的 PCA9548 NVMe MUX |
+| `AD5593R` | 2 | 板级/VR 电压 ADC |
+| `EEPROM` | 2 | MB FRU + MAC EEPROM |
+| `Pid` + `Pid.Zone` + `Stepwise` | 3 | 风扇 PID 控制 |
+
+**注意**：`SYS_Board_Temp`（bus7/0x48）已删除，真机 i2cdetect 确认该地址不存在。
+
+---
+
+### §11.7 传感器数据流验证
+
+烧录新固件后，可以通过以下命令验证传感器是否正常工作：
+
+```bash
+# 查看 hwmon 设备
+ls /sys/class/hwmon/
+
+# 查看某个 hwmon 的温度
+cat /sys/class/hwmon/hwmon*/temp1_input  # 单位：毫摄氏度
+
+# 通过 D-Bus 查看传感器（需要 busctl）
+busctl tree xyz.openbmc_project.HwmonTempSensor
+
+# 查看具体传感器值
+busctl get-property xyz.openbmc_project.HwmonTempSensor \
+    /xyz/openbmc_project/sensors/temperature/Inlet_Temp \
+    xyz.openbmc_project.Sensor.Value Value
+
+# 查看所有温度传感器
+busctl call xyz.openbmc_project.ObjectMapper \
+    /xyz/openbmc_project/object_mapper \
+    xyz.openbmc_project.ObjectMapper \
+    GetSubTree sias / 0 1 xyz.openbmc_project.Sensor.Value
+```
+
+---
+
+### §11.8 面试话术
+
+> "entity-manager 在 OpenBMC 中扮演系统配置中心的角色。它读取 JSON 配置文件，把硬件拓扑发布到 D-Bus，然后各个 dbus-sensors 守护进程（hwmontempsensor、psusensor、adcsensor 等）订阅这些配置，找到对应的 hwmon 文件或 PECI 接口，把传感器值发布到 D-Bus 传感器树上。Redfish 和 IPMI SDR 再从传感器树读取数据。"
+
+> "一个常见的陷阱是 JSON 中的 Type 字段。不是所有芯片型号都被 hwmontempsensor 支持——它只认识自己 sensorTypes 列表里的类型。比如 ADT7475 和 LM87 就不在列表里，如果 JSON 里写这些类型，传感器数据不会出现在 D-Bus 上。正确做法是用 TMP75 类型，hwmontempsensor 会通过 Bus/Address 找到对应的 hwmon 目录读取温度，不管底层芯片是什么型号。"
+
+> 💡 **大白话**：entity-manager 就像一个'设备登记处'，你把所有硬件都登记在 JSON 里。各个传感器守护进程来登记处查询'我负责的设备有哪些'，然后去读取对应的硬件数据。但登记处只认识特定的设备类型——如果你登记了一个它不认识的类型，它就当没看见。所以要用它认识的类型名（TMP75）来登记，即使底层芯片是 ADT7468。
+
+---
+
+## §12. 网络口不通的完整调试过程（evb-2u-egs 真实案例）
+
+本章记录 evb-2u-egs 网络口调试的完整过程，包括三次错误假设和最终正确答案。这是一个典型的"参考原厂代码"解决问题的案例。
+
+---
+
+### §12.1 问题现象
+
+真机烧录 OpenBMC 后，BMC 网口灯完全不亮，无法通过网络访问 BMC。
+
+串口日志显示：
+```
+[    1.124090] mdio_bus 1e650010.mdio-1: MDIO device at address 0 is missing.
+[    1.141400] ftgmac100 1e670000.ethernet: Failed to connect to phy
+[    1.148305] ftgmac100 1e670000.ethernet: probe with driver ftgmac100 failed with error -22
+```
+
+> 💡 **大白话**：BMC 有一个专用的网口（RGMII 管理口），用来让运维人员远程管理服务器。这个网口不亮，说明 BMC 根本没有找到网口芯片（PHY），就像插了网线但网卡没有驱动一样。
+
+---
+
+### §12.2 第一次假设：PHY 被锁在复位状态
+
+**假设**：DTS 中 `phy-reset-hog` 配置了 `GPIO_ACTIVE_LOW` + `output-high`，导致 PHY 持续复位。
+
+**验证**：
+```bash
+cat /sys/kernel/debug/gpio | grep -A2 "RST_RGMII"
+# 输出：gpio-111 (RST_RGMII_PHYRST_N) out hi ACTIVE LOW
+```
+
+**结果**：`out hi` 说明 GPIO 111 物理高电平，PHY **不在复位状态**。假设错误。
+
+但 `output-high` + `GPIO_ACTIVE_LOW` 的逻辑确实有问题（逻辑高 = 物理低），所以仍然修复了极性（改为 `output-low`），使逻辑更清晰。
+
+> 💡 **大白话**：我们以为是"复位按钮一直被按着"，但检查发现按钮其实是松开的。PHY 没有被复位，但还是找不到。
+
+---
+
+### §12.3 第二次假设：PHY 不存在
+
+**假设**：MDIO 总线 0-31 全部无响应，可能这块板子没有焊接外部 PHY。
+
+**验证**：用户明确告知这是真机，有独立 RGMII 管理口。假设错误。
+
+> 💡 **大白话**：我们以为是"网卡芯片没有焊接"，但用户说这是真机，肯定有网卡。
+
+---
+
+### §12.4 第三次假设（正确）：用了错误的 MAC/MDIO
+
+**关键突破**：查看 AMI 原厂 DTS（`ast2600evb_r1b.dts`）：
+
+```dts
+/* AMI 原厂配置 */
+&mdio1 { status = "okay"; ethphy1@0 { ... }; };  /* RGMII PHY 在 mdio1 */
+&mac1 { status = "okay"; phy-mode = "rgmii-rxid"; phy-handle = <&ethphy1>; };  /* RGMII 管理口 */
+&mac2 { status = "okay"; phy-mode = "rmii"; use-ncsi; };  /* NCSI 口 */
+```
+
+**我们的错误配置**：
+```dts
+/* 我们的错误配置 */
+&mdio2 { status = "okay"; ethphy1@0 { ... }; };  /* 错！PHY 不在 mdio2 */
+&mac2 { status = "okay"; phy-mode = "rgmii-rxid"; };  /* 错！RGMII 不是 mac2 */
+&mac3 { status = "okay"; use-ncsi; };  /* 错！NCSI 不是 mac3 */
+```
+
+**AST2600 MAC/MDIO 对应关系（evb-2u-egs 实际使用）：**
+
+| DTS 标签 | 硬件地址 | 功能 | 状态 |
+|---------|---------|------|------|
+| `&mac0` | 1e660000 | 未使用 | disabled |
+| **`&mac1`** | **1e680000** | **RGMII 独立管理口（外部 PHY）** | **okay** |
+| **`&mac2`** | **1e670000** | **RMII + NCSI（共享管理网）** | **okay** |
+| `&mac3` | 1e690000 | 未使用 | disabled |
+| `&mdio0` | 1e650000 | 未使用 | disabled |
+| **`&mdio1`** | **1e650008** | **RGMII PHY 所在总线** | **okay** |
+| `&mdio2` | 1e650010 | 未使用（释放 M24 引脚） | disabled |
+| `&mdio3` | 1e650018 | 未使用 | disabled |
+
+> 💡 **大白话**：AST2600 有 4 个网口控制器（mac0-mac3）和 4 个 MDIO 总线（mdio0-mdio3）。我们一直在用 mac2+mdio2，但实际上这台机器的独立管理口接在 mac1+mdio1 上。就像你家有 4 个网口，你一直在插第 3 个口，但网线其实接在第 2 个口上。
+
+---
+
+### §12.5 修复方案
+
+```dts
+/* 修复后的网络配置 */
+&mdio1 {
+    status = "okay";
+    ethphy1: ethernet-phy@0 {
+        compatible = "ethernet-phy-ieee802.3-c22";
+        reg = <0>;
+    };
+};
+
+/* mac1: RGMII 独立管理口（BMC 专用，不依赖主机） */
+&mac1 {
+    status = "okay";
+    phy-mode = "rgmii-rxid";
+    phy-handle = <&ethphy1>;
+    pinctrl-names = "default";
+    pinctrl-0 = <&pinctrl_rgmii2_default>;
+};
+
+/* mac2: RMII + NCSI（通过主机 NIC 的 sideband 通道） */
+&mac2 {
+    status = "okay";
+    phy-mode = "rmii";
+    use-ncsi;
+    pinctrl-names = "default";
+    pinctrl-0 = <&pinctrl_rmii3_default>;
+};
+```
+
+**额外收益**：mdio2 不再使用，释放了 M24 引脚，i2c10（后置 CPLD）可以重新启用。
+
+---
+
+### §12.6 如何避免这类错误
+
+**核心方法：遇到硬件相关问题，先查原厂代码。**
+
+```bash
+# 在 AMI 源码中找 DTS
+find /home/dev/openbmc-workspace/AMI_bmc_code/ -name "*.dts" | xargs grep -l "mac\|mdio\|phy"
+
+# 对比原厂 MAC/MDIO 配置
+grep -n "mac\|mdio\|phy\|rgmii\|rmii\|ncsi" \
+    /home/dev/openbmc-workspace/AMI_bmc_code/src/core/Kernel_5_Config-ARM-AST2600-AST2600EVB-src/data/ast2600evb_r1b.dts
+```
+
+**AST2600 MAC 命名规律**：
+
+AST2600 的 MAC 编号在不同文档中有不同叫法，容易混淆：
+
+| 文档/代码 | 叫法 | 硬件地址 |
+|---------|------|---------|
+| 硬件手册 | MAC1, MAC2, MAC3, MAC4 | 1e660000, 1e680000, 1e670000, 1e690000 |
+| Linux DTS | mac0, mac1, mac2, mac3 | 同上（从0开始） |
+| AMI 代码 | MAC0, MAC1, MAC2, MAC3 | 同上 |
+
+**注意**：硬件手册的 MAC1 = Linux DTS 的 mac0，以此类推。**不要混用不同来源的编号**。
+
+---
+
+### §12.7 面试话术
+
+> "在 evb-2u-egs 移植中，我遇到过一个 BMC 网口完全不通的问题。调试过程经历了三个阶段：第一，怀疑 PHY 被 GPIO 锁在复位状态，通过 `/sys/kernel/debug/gpio` 确认 GPIO 是高电平，排除；第二，怀疑 PHY 芯片没有焊接，被用户否定；第三，通过对比 AMI 原厂 DTS 发现，我们用的是错误的 MAC/MDIO 组合——独立管理口是 mac1+mdio1，而我们配置的是 mac2+mdio2。修复后不仅网口通了，还顺带解决了 i2c10 的引脚冲突问题。"
+
+> 💡 **大白话**：这个问题的教训是——遇到硬件不通的问题，不要只靠猜，要去找原厂代码对比。原厂工程师已经把正确答案写在 DTS 里了，直接抄就行。我们花了很多时间猜测，最后发现答案就在 AMI 代码里，5分钟就能找到。

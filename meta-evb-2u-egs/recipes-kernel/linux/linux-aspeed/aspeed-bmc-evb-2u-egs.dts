@@ -129,11 +129,12 @@
 	/*AB0-AB7*/ "","","","","","","","",
 	/*AC0-AC7*/ "","","","","","","","";
 
-	/* PHY reset: hold high at boot */
+	/* PHY reset: deassert reset (RST_RGMII_PHYRST_N is active-low;
+	 * output-low = logical LOW = physical HIGH = PHY running normally) */
 	phy-reset-hog {
 		gpio-hog;
 		gpios = <ASPEED_GPIO(N, 7) GPIO_ACTIVE_LOW>;
-		output-high;
+		output-low;
 		line-name = "RST_RGMII_PHYRST_N";
 	};
 
@@ -188,7 +189,12 @@
 };
 
 /* ===== Network ===== */
-&mdio2 {
+/* AMI DTS reference (ast2600evb_r1b.dts) confirmed:
+ *   mac1 (1e680000) + mdio1 (1e650008) = RGMII-RXID, external PHY @ addr 0
+ *   mac2 (1e670000) = RMII + NCSI (management network)
+ *   mdio2 disabled → frees pin M24 → i2c10 can be enabled
+ */
+&mdio1 {
 	status = "okay";
 
 	ethphy1: ethernet-phy@0 {
@@ -197,22 +203,22 @@
 	};
 };
 
-/* mac1: RGMII with external PHY */
-&mac2 {
+/* mac1: RGMII with external PHY (BMC dedicated management port) */
+&mac1 {
 	status = "okay";
 	phy-mode = "rgmii-rxid";
 	phy-handle = <&ethphy1>;
 	pinctrl-names = "default";
-	pinctrl-0 = <&pinctrl_rgmii3_default>;
+	pinctrl-0 = <&pinctrl_rgmii2_default>;
 };
 
-/* mac2: RMII with NC-SI (BMC management) */
-&mac3 {
+/* mac2: RMII with NC-SI (shared management via host NIC) */
+&mac2 {
 	status = "okay";
 	phy-mode = "rmii";
 	use-ncsi;
 	pinctrl-names = "default";
-	pinctrl-0 = <&pinctrl_rmii4_default>;
+	pinctrl-0 = <&pinctrl_rmii3_default>;
 };
 
 /* ===== PECI: CPU thermal via PECI bus ===== */
@@ -451,28 +457,32 @@
 	status = "disabled";
 };
 
-/* Bus 7: PSU PMBus + system board sensors */
+/* Bus 7: PSU PMBus + system board sensors
+ * multi-master: PSU PMBus controllers may also act as I2C masters.
+ * Devices confirmed by i2cdetect -y 7 on real hardware:
+ *   0x2d (UU) = LM87 (claimed by driver)
+ *   0x2e      = ADT7468 (compatible with adi,adt7476 driver; devid=0x76)
+ *   0x50      = PSU FRU EEPROM (read-only, no driver needed)
+ *   0x58      = PSU1 PMBus (no response when host is off - expected)
+ * Note: lm75@0x48 not detected on real hardware - removed.
+ */
 &i2c7 {
 	status = "okay";
 	multi-master;
 
-	/* System board environment sensors */
+	/* System board environment sensor (LM87: temp/voltage/fan/chassis) */
 	lm87@2d {
 		compatible = "ti,lm87";
 		reg = <0x2d>;
 	};
 
-	adt7475@2e {
-		compatible = "adi,adt7475";
+	/* ADT7468 thermal/fan/voltage sensor (compatible with adt7476 driver) */
+	adt7468@2e {
+		compatible = "adi,adt7476";
 		reg = <0x2e>;
 	};
 
-	lm75@48 {
-		compatible = "national,lm75";
-		reg = <0x48>;
-	};
-
-	/* PSU 1 PMBus */
+	/* PSU 1 PMBus (GREAT WALL CRPS1600D) */
 	psu@58 {
 		compatible = "pmbus";
 		reg = <0x58>;
@@ -510,10 +520,14 @@
 	 */
 };
 
-/* Bus 10: Rear/internal CPLD access */
+/* Bus 10: Rear/internal CPLD (0x58, 0x59, 0x5A).
+ * Previously disabled due to pin M24 conflict with mdio2.
+ * Now mdio2 is no longer used (RGMII moved to mac1/mdio1),
+ * so M24 is free and i2c10 can be enabled.
+ */
 &i2c10 {
 	status = "okay";
-	/* CPLD @ 0x58, 0x59, 0x5A */
+	/* Rear/internal CPLD @ 0x58, 0x59, 0x5A */
 };
 
 /* Bus 11: unused */
